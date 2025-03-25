@@ -1,0 +1,3824 @@
+diff --git a/.gitignore b/.gitignore
+index e5e99392..c1f986f1 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -50,6 +50,7 @@ Programs/Bytecode/*
+ Programs/Schedules/*
+ Programs/Public-Input/*
+ Programs/Functions
++MPHE/seal/*
+ *.com
+ *.class
+ *.dll
+diff --git a/CONFIG b/CONFIG
+index 0c92c933..a7d6b9ac 100644
+--- a/CONFIG
++++ b/CONFIG
+@@ -123,6 +123,9 @@ CFLAGS += -Wno-error=unused-parameter -Wno-error=deprecated-copy
+ endif
+ endif
+ 
++CFLAGS += -I./MPHE/seal/include/SEAL-4.1/ 
++SEAL = -L./MPHE/seal/lib/ -lseal-4.1 
++
+ ifeq ($(USE_KOS),1)
+ CFLAGS += -DUSE_KOS
+ else
+diff --git a/MPHE/MPHEGaloisTool.h b/MPHE/MPHEGaloisTool.h
+new file mode 100644
+index 00000000..f345723f
+--- /dev/null
++++ b/MPHE/MPHEGaloisTool.h
+@@ -0,0 +1,63 @@
++
++#ifndef CODE_MPHEGALOISTOOL_H
++#define CODE_MPHEGALOISTOOL_H
++
++#include "mphe.h"
++
++template<class T>
++class MPHEGaloisTool
++{
++public:
++    explicit MPHEGaloisTool(size_t coeff_count) : coeff_count_(coeff_count)
++    {
++        coeff_count_power_ = get_power_of_two(coeff_count);
++        permutation_tables = vector<vector<uint32_t>>(coeff_count);
++        for (auto& vec: permutation_tables) {
++            vec = vector<uint32_t>(coeff_count);
++        }
++    }
++
++    MPHEGaloisTool(const MPHEGaloisTool<T>& other) = delete;
++
++    void apply_galois_ntt(const vector<T>& operand, size_t coeff_modulus_size, uint32_t galois_elt, vector<T>& result);
++
++private:
++
++    void generate_table_ntt(std::uint32_t galois_elt, vector<uint32_t> &result_) const;
++
++    size_t coeff_count_;
++
++    size_t coeff_count_power_;
++
++    vector<vector<uint32_t>> permutation_tables;
++
++};
++
++template<class T>
++void MPHEGaloisTool<T>::apply_galois_ntt(const vector<T> &operand, size_t coeff_modulus_size, uint32_t galois_elt, vector<T> &result) {
++    for (size_t i = 0; i < coeff_modulus_size; ++i) {
++        size_t offset = i * coeff_count_;
++        generate_table_ntt(galois_elt, permutation_tables.at(seal::util::GaloisTool::GetIndexFromElt(galois_elt)));
++        auto table_ = permutation_tables.at(seal::util::GaloisTool::GetIndexFromElt(galois_elt));
++        for (size_t j = 0; j < coeff_count_; ++j) {
++            size_t index = offset + j;
++            result.at(index) = operand.at(offset + table_.at(j));
++        }
++    }
++}
++
++template<class T>
++void MPHEGaloisTool<T>::generate_table_ntt(uint32_t galois_elt, vector<uint32_t> &result_) const
++{
++
++    uint32_t coeff_count_minus_one = safe_cast<uint32_t>(coeff_count_) - 1;
++    for (size_t i = coeff_count_; i < coeff_count_ << 1; i++)
++    {
++        auto reversed = reverse_bits<uint32_t>(safe_cast<uint32_t>(i), coeff_count_power_ + 1);
++        uint64_t index_raw = (static_cast<uint64_t>(galois_elt) * static_cast<uint64_t>(reversed)) >> 1;
++        index_raw &= static_cast<uint64_t>(coeff_count_minus_one);
++        result_.at(i - coeff_count_) = reverse_bits<uint32_t>(static_cast<uint32_t>(index_raw), coeff_count_power_);
++    }
++}
++
++#endif //CODE_MPHEGALOISTOOL_H
+diff --git a/MPHE/MPHEKeygen.h b/MPHE/MPHEKeygen.h
+new file mode 100644
+index 00000000..00365367
+--- /dev/null
++++ b/MPHE/MPHEKeygen.h
+@@ -0,0 +1,127 @@
++
++#ifndef CODE_MPHEKEYGEN_H
++#define CODE_MPHEKEYGEN_H
++
++#include "rlweHelper.h"
++#include "MPHEGaloisTool.h"
++// #include "MPHEKeySwitch.h"
++// #include "MPHERelinKeyGen.h"
++#include <iostream>
++#include <iomanip>
++
++void print_polynomial(uint64_t *polynomial, size_t len, const std::string& name);
++
++void print_seed(seal::prng_seed_type& seed);
++
++void print_pk(seal::PublicKey pk, size_t len, std::string&& name);
++
++
++
++template<class T>
++class MPHEKeygen : public seal::KeyGenerator{
++
++    template<class U>
++    friend class mpheAPI;
++
++public:
++
++    MPHEKeygen(const seal::SEALContext &context, Player &P, ProtocolSet<T>& set, seal::SecretKey &sk, bool dummy);
++
++    MPHEKeygen(const seal::SEALContext &context, Player &P, ProtocolSet<T>& set);
++
++    MPHEKeygen(const MPHEKeygen<T>& copy) = delete;
++
++    MPHEKeygen(MPHEKeygen<T>&& other) = delete;
++
++
++    seal::PublicKey generate_pk_share(SharedSecretKey<T>& shared_sk);
++
++
++    vector<vector<T>> & compute_secret_key_vector(size_t max_power);
++
++    map<uint32_t, vector<T>> & compute_rotated_key_vector(const vector<uint32_t> &galois_elts);
++
++    void create_shared_galois_keys(seal::GaloisKeys &galois_keys, const vector<uint32_t> &galois_elts, 
++                                seal::EncryptionParameters* params_full = nullptr, int agent_id = -1);
++
++    void create_galois_relin_keys(seal::GaloisKeys &galoisKeys, seal::RelinKeys &relinKeys,
++                                  const vector<uint32_t> &galois_elts);
++
++    void key_switch(seal::Ciphertext& ct_old, seal::Ciphertext& ct_new, MPHEKeygen<T>& keygen_new, seal::prng_seed_type* seed = nullptr);
++
++    void collective_bootstrap(seal::Ciphertext& ct_old, seal::Ciphertext& ct_new, double smudge = 1.0, seal::prng_seed_type* seed = nullptr);
++
++    void bootstrap_mpc_part(seal::Ciphertext& ct_old, seal::Ciphertext& ct_new, uint64_t* h0, double smudge = 1.0, seal::prng_seed_type* seed = nullptr);
++
++    void collective_decrypt(seal::Ciphertext& ct, seal::Plaintext& plaintext, seal::prng_seed_type* seed = nullptr);
++
++    // creates polynomial ready for decryption
++    void create_decryption_phase(seal::Ciphertext& ct, seal::Plaintext& plaintext, seal::prng_seed_type* seed);
++
++    void pub_key_switch(seal::Ciphertext& ct_old, seal::Ciphertext& ct_new, seal::PublicKey& pk_new, seal::prng_seed_type* seed = nullptr);
++
++    void pub_key_switch(seal::Ciphertext& ct_old, seal::Ciphertext& ct_new, MPHEKeygen<T>& keygen_new){
++        pub_key_switch(ct_old, ct_new, keygen_new.pk_shared_);
++    }
++
++    void create_relin_keys_use_square(seal::RelinKeys &relin_keys, seal::EncryptionParameters* params_full = nullptr, int agent_id = -1);
++
++    void create_relin_keys_use_paper(seal::RelinKeys &relin_keys);
++
++    seal::SecretKey open_secret_key();
++
++    Player& P(){
++        return shared_secret_key_.P();
++    }
++
++    vector<T>&  key_at(size_t index){
++        return  secret_key_vector_.at(index);
++    }
++
++    size_t get_polynomial_len(){
++        return polynomial_len_;
++    }
++
++    SharedSecretKey<T>& sharedSecretKey(){
++        return shared_secret_key_;
++    }
++
++    seal::PublicKey& get_pk_shared(){
++        return pk_shared_;
++    }
++
++    bool DUMMY;
++
++    seal::PublicKey pk_shared_;
++
++    void generate_one_kswitch_key(vector<T> &new_key, vector<seal::PublicKey> &destination, uint64_t *c1_polys,
++                                uint64_t key_modulus_value, seal::EncryptionParameters* full_params = nullptr, int agent_id = -1);
++
++    void generate_two_kswitch_keys(vector<T> &squared_key, vector<T> &rotated_key,
++                                   vector<seal::PublicKey> &rlk_destination,
++                                   vector<seal::PublicKey> &glk_destination, uint64_t *c1_polys);
++
++private:
++
++    void create_h0_h1(const vector<T>& ui, size_t iteration, uint64_t* h0_destination, uint64_t* h1_destination);
++    void create_h0_h1_dash(const vector<T> &ui, const uint64_t *h0_destination, 
++        const uint64_t *h1_destination, uint64_t *h0_dash_destination, uint64_t *h1_dash_destination);
++
++    seal::SEALContext context_;
++
++
++    SharedSecretKey<T> shared_secret_key_;
++
++    MPHEGaloisTool<T> galois_tool_;
++
++    vector<std::vector<T>> secret_key_vector_;
++
++    map<uint32_t, std::vector<T>> rotated_key_map;
++
++    size_t polynomial_len_;
++
++
++};
++
++#include "MPHEKeygen.hpp"
++#endif // CODE_MPHEKEYGEN_H
+\ No newline at end of file
+diff --git a/MPHE/MPHEKeygen.hpp b/MPHE/MPHEKeygen.hpp
+new file mode 100644
+index 00000000..fec8f2bf
+--- /dev/null
++++ b/MPHE/MPHEKeygen.hpp
+@@ -0,0 +1,932 @@
++#include "MPHEKeygen.h"
++
++template<class T>
++seal::PublicKey MPHEKeygen<T>::generate_pk_share(SharedSecretKey<T>& shared_sk) {
++    seal::PublicKey shared_pk;
++    auto &context_data = *context_.key_context_data();
++    encrypt_shared_zero_symmetric<T>(shared_sk, context_, context_data.parms_id(), shared_pk.data());
++    shared_pk.parms_id() = context_data.parms_id();
++    return shared_pk;
++}
++
++template<class T>
++MPHEKeygen<T>::MPHEKeygen(const seal::SEALContext &context, Player &P, ProtocolSet<T>& set, seal::SecretKey &sk,
++                          bool dummy)
++        : KeyGenerator(context, std::move(sk)), DUMMY(dummy), context_(context), 
++        shared_secret_key_(SharedSecretKey<T>(secret_key(), P, context, set, DUMMY)), 
++        galois_tool_(MPHEGaloisTool<T>(shared_secret_key_.coeff_count_))
++{
++    size_t coeff_count = shared_secret_key_.coeff_count_;
++    size_t coeff_modulus_size = shared_secret_key_.coeff_modulus_size_;
++    secret_key_vector_.emplace_back(shared_secret_key_.data());
++
++    // Size check
++    if (!seal::util::product_fits_in(coeff_count, coeff_modulus_size))
++    {
++        throw std::logic_error("invalid parameters");
++    }
++
++    polynomial_len_ = coeff_count * coeff_modulus_size;
++    pk_shared_ = generate_pk_share(shared_secret_key_);
++}
++
++template<class T>
++MPHEKeygen<T>::MPHEKeygen(const seal::SEALContext &context, Player &P, ProtocolSet<T>& set)
++        : KeyGenerator(context), DUMMY(false), context_(context),
++        shared_secret_key_(SharedSecretKey<T>(secret_key(), P, context, set, DUMMY)),
++        galois_tool_(MPHEGaloisTool<T>(context_.key_context_data()->parms().poly_modulus_degree()))
++          {
++    // Extract encryption parameters.
++    auto &context_data = *context_.key_context_data();
++    auto &parms = context_data.parms();
++    auto &coeff_modulus = parms.coeff_modulus();
++    size_t coeff_count = parms.poly_modulus_degree();
++    size_t coeff_modulus_size = coeff_modulus.size();
++    auto pool = seal::MemoryManager::GetPool(seal::mm_prof_opt::mm_force_new, true);
++
++    secret_key_vector_.emplace_back(shared_secret_key_.data());
++
++    // Size check
++    if (!seal::util::product_fits_in(coeff_count, coeff_modulus_size))
++    {
++        throw std::logic_error("invalid parameters");
++    }
++
++    polynomial_len_ = coeff_count * coeff_modulus_size;
++
++    pk_shared_ = generate_pk_share(shared_secret_key_);
++
++
++}
++
++template<class T>
++vector<vector<T>>& MPHEKeygen<T>::compute_secret_key_vector(size_t max_power) {
++
++    if(secret_key_vector_.empty()){
++        throw std::logic_error("secret key vector uninitialized");
++    }
++    if(max_power <= secret_key_vector_.size()){
++        return secret_key_vector_;
++    }
++    size_t len = shared_secret_key_.data().size();
++    size_t final_index = secret_key_vector_.size() - 1;
++    vector<T>& first_key = secret_key_vector_.at(0);
++    for (size_t i = 0; i < max_power - secret_key_vector_.size(); ++i) {
++        vector<T>& key_data = secret_key_vector_.at(final_index);
++        final_index++;
++        vector<T> result(len);
++        dyadic_product_coeffmod_(shared_secret_key_, first_key, key_data, len, result);
++        secret_key_vector_.emplace_back(result);
++    }
++    return secret_key_vector_;
++}
++
++template<class T>
++void MPHEKeygen<T>::create_galois_relin_keys(seal::GaloisKeys &galoisKeys, seal::RelinKeys &relinKeys,
++                                             const vector<uint32_t> &galois_elts) {
++    auto &context_data = *context_.key_context_data();
++    auto& parms = context_.key_context_data()->parms();
++    size_t decomp_mod_count = context_.first_context_data()->parms().coeff_modulus().size();
++    auto& key_modulus = parms.coeff_modulus();
++    uint64_t key_mod = key_modulus.back().value();
++    if (!context_data.qualifiers().using_batching)
++    {
++        throw logic_error("encryption parameters do not support batching");
++    }
++
++    auto& key_vector = compute_secret_key_vector(2);
++    auto& key_square = key_vector.at(1);
++    relinKeys.data().resize(1);
++    auto& rotated_map = compute_rotated_key_vector(galois_elts);
++    galoisKeys.data().resize(shared_secret_key_.coeff_count_);
++    size_t len = key_square.size();
++    // rotated map + 1 for galois plus relin key times key len times size of kswitch key matrix.
++    size_t c1_size = (rotated_map.size() + 1) * len * decomp_mod_count;
++
++    auto* c1_polys = (uint64_t*) calloc(c1_size, sizeof(uint64_t));
++    seal::prng_seed_type seed = sample_common_polynomial_PRF(c1_polys, parms, len, shared_secret_key_);
++    for (size_t i = 1; i < decomp_mod_count * (rotated_map.size() + 1); ++i) {
++        sample_common_polynomial_PRF(c1_polys + len * i, parms, len, shared_secret_key_, &seed);
++    }
++
++
++    generate_two_kswitch_keys(key_square, rotated_map.begin()->second, relinKeys.data().at(0),
++                              galoisKeys.data()[seal::GaloisKeys::get_index(rotated_map.begin()->first)], c1_polys);
++
++    auto* c1_poly = c1_polys;
++    for (auto& entry : rotated_map) {
++        c1_poly = c1_poly + len * decomp_mod_count;
++        uint32_t galois_elt = entry.first;
++        if (galoisKeys.has_key(galois_elt)){
++            continue;
++        }
++        generate_one_kswitch_key(entry.second, galoisKeys.data()[seal::GaloisKeys::get_index(galois_elt)],
++                                 c1_poly, key_mod);
++    }
++
++    shared_secret_key_.finalize_open();
++
++    galoisKeys.parms_id() = context_data.parms_id();
++    relinKeys.parms_id()  = context_data.parms_id();
++    free(c1_polys);
++}
++
++template<class T>
++void MPHEKeygen<T>::create_relin_keys_use_square(seal::RelinKeys &relin_keys, seal::EncryptionParameters* params_full,
++                                                     int agent_id) {
++    auto& key_vector = compute_secret_key_vector(2);
++    auto& key_square = key_vector.at(1);
++    auto &key_context_data = *context_.key_context_data();
++    auto& parms = context_.key_context_data()->parms();
++    size_t decomp_mod_count = context_.first_context_data()->parms().coeff_modulus().size();
++    auto &key_modulus = parms.coeff_modulus();
++    uint64_t key_mod = key_modulus.back().value();
++
++    if(params_full != nullptr){
++        seal::SEALContext context_full(*params_full);
++        decomp_mod_count = context_full.key_context_data()->parms().coeff_modulus().size();
++        key_mod = params_full->coeff_modulus().back().value();
++    }
++
++    relin_keys.data().resize(1);
++    size_t len = key_square.size();
++    auto* c1_polys = (uint64_t*) calloc(len * decomp_mod_count, sizeof(uint64_t));
++    seal::prng_seed_type seed = sample_common_polynomial_PRF(c1_polys, parms, len, shared_secret_key_);
++    for (size_t i = 1; i < decomp_mod_count; ++i) {
++        sample_common_polynomial_PRF(c1_polys + len * i, parms, len, shared_secret_key_, &seed);
++    }
++    generate_one_kswitch_key(key_square, relin_keys.data().at(0), c1_polys, key_mod, params_full, agent_id);
++    free(c1_polys);
++    shared_secret_key_.finalize_open();
++
++    relin_keys.parms_id() = key_context_data.parms_id();
++}
++
++template<class T>
++map<uint32_t, vector<T>> & MPHEKeygen<T>::compute_rotated_key_vector(const vector<uint32_t> &galois_elts) {
++    size_t coeff_count = shared_secret_key_.coeff_count_;
++    size_t coeff_modulus_size = shared_secret_key_.coeff_modulus_size_;
++
++    const vector<T>& key = shared_secret_key_.data();
++    for (auto galois_elt : galois_elts) {
++        if (!(galois_elt & 1) || (galois_elt >= coeff_count << 1)){
++            throw invalid_argument("Galois element is not valid");
++        }
++
++        rotated_key_map[galois_elt] = vector<T>(key.size());
++        galois_tool_.apply_galois_ntt(key, coeff_modulus_size, galois_elt, rotated_key_map[galois_elt]);
++    }
++    return rotated_key_map;
++}
++
++template<class T>
++void MPHEKeygen<T>::create_shared_galois_keys(seal::GaloisKeys &galois_keys, const vector<uint32_t> &galois_elts,
++                                             seal::EncryptionParameters* params_full, int agent_id) {
++    auto &key_context_data = *context_.key_context_data();
++    if (!key_context_data.qualifiers().using_batching)
++    {
++        throw logic_error("encryption parameters do not support batching");
++    }
++
++    auto& rotated_map = compute_rotated_key_vector(galois_elts);
++    galois_keys.data().resize(shared_secret_key_.coeff_count_);
++    auto& parms = context_.key_context_data()->parms();
++    size_t decomp_mod_count = context_.first_context_data()->parms().coeff_modulus().size();
++    auto& key_modulus = parms.coeff_modulus();
++    uint64_t key_mod = key_modulus.back().value();
++    if(params_full != nullptr){
++        seal::SEALContext context_full(*params_full);
++        decomp_mod_count = context_full.key_context_data()->parms().coeff_modulus().size();
++        key_mod = params_full->coeff_modulus().back().value();
++    }
++
++    size_t len = parms.coeff_modulus().size() * parms.poly_modulus_degree();
++    auto* c1_polys = (uint64_t*) calloc(len * decomp_mod_count, sizeof(uint64_t));
++    seal::prng_seed_type seed;
++    sample_common_seed(shared_secret_key_, seed);
++
++    for (auto& entry : rotated_map) {
++        uint32_t galois_elt = entry.first;
++        if (galois_keys.has_key(galois_elt)){
++            continue;
++        }
++        for (size_t i = 0; i < decomp_mod_count; ++i) {
++            sample_common_polynomial_PRF(c1_polys + len * i, parms, len, shared_secret_key_, &seed);
++        }
++        generate_one_kswitch_key(entry.second, galois_keys.data()[seal::GaloisKeys::get_index(galois_elt)], 
++                                c1_polys, key_mod, params_full, agent_id);
++    }
++    free(c1_polys);
++    shared_secret_key_.finalize_open();
++
++    galois_keys.parms_id() = key_context_data.parms_id();
++}
++
++template<class T>
++void MPHEKeygen<T>::generate_two_kswitch_keys(vector<T> &squared_key, vector<T> &rotated_key,
++                                              vector<seal::PublicKey> &rlk_destination,
++                                              vector<seal::PublicKey> &glk_destination, uint64_t *c1_polys) {
++    size_t coeff_count = context_.key_context_data()->parms().poly_modulus_degree();
++    size_t decomp_mod_count = context_.first_context_data()->parms().coeff_modulus().size();
++
++    auto &key_context_data = *context_.key_context_data();
++    auto &key_parms = key_context_data.parms();
++    auto &key_modulus = key_parms.coeff_modulus();
++    size_t coeff_modulus_size = key_parms.coeff_modulus().size();
++    size_t key_len = coeff_count * coeff_modulus_size;
++
++    vector<T> temp_small1(coeff_count);
++    vector<T> temp_small2(coeff_count);
++    vector<T> temp_big(key_len);
++    vector<T> temp_big1(key_len);
++    rlk_destination.resize(decomp_mod_count);
++    glk_destination.resize(decomp_mod_count);
++
++    for (size_t i = 0; i < decomp_mod_count; ++i) {
++        size_t offset = i * coeff_count;
++        auto& ct1 = rlk_destination.at(i).data();
++        auto& ct2 = glk_destination.at(i).data();
++        ct1.resize(context_, key_context_data.parms_id(), 2);
++        ct1.is_ntt_form() = true;
++        ct1.scale() = 1.0;
++        ct2.resize(context_, key_context_data.parms_id(), 2);
++        ct2.is_ntt_form() = true;
++        ct2.scale() = 1.0;
++
++        memcpy(ct1.data(1), c1_polys + key_len * i, key_len);
++        create_shared_pk(shared_secret_key_, ct1.data(1), temp_big, context_,
++                         key_context_data.parms_id(), false);
++        memcpy(ct2.data(1), ct1.data(1), key_len * sizeof(uint64_t));
++
++        uint64_t factor = barrett_reduce_64(key_modulus.back().value(), key_modulus.at(i));
++
++        multiply_poly_shared_scalar(squared_key, factor, coeff_count, temp_small1, offset);
++        multiply_poly_shared_scalar(rotated_key, factor, coeff_count, temp_small2, offset);
++
++        add_small_(temp_small1, temp_big, offset, temp_big1);
++        add_small_(temp_small2, temp_big, offset, temp_big);
++
++        shared_secret_key_.prepare_open(&temp_big1, ct1.data(), key_modulus);
++        shared_secret_key_.prepare_open(&temp_big, ct2.data(), key_modulus);
++    }
++}
++
++template<class T>
++void
++MPHEKeygen<T>::generate_one_kswitch_key(vector<T> &new_key, vector<seal::PublicKey> &destination, uint64_t *c1_polys,
++                uint64_t key_modulus_value, seal::EncryptionParameters* full_params, int agent_id) {
++
++    size_t coeff_count = context_.key_context_data()->parms().poly_modulus_degree();
++    size_t decomp_mod_count = context_.first_context_data()->parms().coeff_modulus().size();
++    if(full_params != nullptr){
++        if(agent_id == -1){
++            throw logic_error("Cannot compute kswitch key component for agent without id");
++        }
++        seal::SEALContext context_full(*full_params);
++        decomp_mod_count = context_full.key_context_data()->parms().coeff_modulus().size();
++    }
++    auto &key_context_data = *context_.key_context_data();
++    auto &key_parms = key_context_data.parms();
++    auto &key_modulus = key_parms.coeff_modulus();
++    size_t coeff_modulus_size = key_parms.coeff_modulus().size();
++    size_t key_len = coeff_count * coeff_modulus_size;
++
++    vector<T> temp_small(coeff_count);
++    vector<T> temp_big(key_len);
++    destination.resize(decomp_mod_count);
++
++    for (size_t i = 0; i < decomp_mod_count; ++i) {
++        size_t offset = i * coeff_count;
++        auto& ct = destination.at(i).data();
++        ct.resize(context_, key_context_data.parms_id(), 2);
++        ct.is_ntt_form() = true;
++        ct.scale() = 1.0;
++
++        memcpy(ct.data(1), c1_polys + key_len * i, key_len * sizeof(uint64_t));
++
++        create_shared_pk(shared_secret_key_, ct.data(1), temp_big, context_,
++                         key_context_data.parms_id(), false);
++
++        auto current_key_mod = seal::Modulus(key_modulus_value);
++    
++        if(agent_id == -1){ // This is a single process running the protocol
++            current_key_mod = key_modulus.at(i);
++        } else { // Multiple agents run the algorithms
++            offset = 0;
++        }
++        if(i == (size_t)agent_id){
++            current_key_mod = key_modulus.at(0);
++        }
++
++        uint64_t factor = barrett_reduce_64(key_modulus_value, current_key_mod);
++
++        multiply_poly_shared_scalar(new_key, factor, coeff_count, temp_small, offset);
++
++        add_small_(temp_small, temp_big, offset);
++
++        //open_polynomial(shared_secret_key_, temp_big, key_modulus, ct.coeff_modulus_size(), ct.data());
++        shared_secret_key_.prepare_open(&temp_big, ct.data(), key_modulus);
++    }
++}
++
++
++template<class T>
++void MPHEKeygen<T>::key_switch(seal::Ciphertext &ct_old, seal::Ciphertext &ct_new, MPHEKeygen<T> &keygen_new, seal::prng_seed_type* seed) {
++    
++    seal::MemoryPoolHandle pool = seal::MemoryManager::GetPool(seal::mm_prof_opt::mm_force_new, true);
++    auto& context_data = *context_.get_context_data(ct_old.parms_id());
++    auto &parms = context_data.parms();
++    auto &coeff_modulus = parms.coeff_modulus();
++    size_t coeff_modulus_size = ct_old.coeff_modulus_size();
++    size_t coeff_count = parms.poly_modulus_degree();
++
++    bool bfv = parms.scheme() == seal::scheme_type::bfv;
++
++    auto ntt_tables = context_data.small_ntt_tables();
++
++    ct_new.resize(context_, context_data.parms_id(), 2);
++    ct_new.is_ntt_form() = ct_old.is_ntt_form();
++    ct_new.scale() = ct_old.scale();
++
++    auto bootstrap_prng = (seed == nullptr) ? parms.random_generator()->create() : parms.random_generator()->create(*seed);
++    uint64_t *c0 = ct_new.data();
++    uint64_t *c1 = ct_new.data(1);
++        
++    uint64_t *c0_old = ct_old.data();
++    uint64_t *c1_old = ct_old.data(1);
++
++    vector<T> c0_shared(coeff_count * coeff_modulus_size);
++    const vector<T>& sk_old = sharedSecretKey().data();
++    const vector<T>& sk_new = keygen_new.sharedSecretKey().data();
++    vector<T> noise(coeff_count * coeff_modulus_size);
++
++    memcpy(c1, c1_old, coeff_modulus_size * coeff_count * sizeof(uint64_t));
++    auto noise_(seal::util::allocate_poly(coeff_count, coeff_modulus_size, pool));
++
++
++    sample_poly_large_uniform<T>(bootstrap_prng, parms, noise_.get(), 16);
++    //seal::util::SEAL_NOISE_SAMPLER(bootstrap_prng, parms, noise_.get());
++
++    sub_poly_coeffmod_(sk_old, sk_new, c0_shared, c0_shared.size());
++
++    for (size_t i = 0; i < coeff_modulus_size; ++i) {
++        size_t offset = i * coeff_count;
++        if(bfv){
++            ntt_negacyclic_harvey(c1_old + offset, ntt_tables[i]);
++        }
++        ntt_negacyclic_harvey(noise_.get() + offset, ntt_tables[i]);
++    }
++    distribute_noise(noise_.get(), noise.size(), shared_secret_key_, noise);
++
++    dyadic_product_coeffmod_(c0_shared, c1_old, c0_shared.size(), c0_shared);
++
++    add_poly_coeffmod_(c0_shared, noise, c0_shared);
++
++    open_polynomial(shared_secret_key_, c0_shared, coeff_modulus, coeff_modulus_size, c0);
++
++
++    for (size_t i = 0; i < coeff_modulus_size; ++i) {
++        size_t offset = i * coeff_count;
++        if(bfv){
++            inverse_ntt_negacyclic_harvey(c0 + offset, ntt_tables[i]);
++            inverse_ntt_negacyclic_harvey(c1_old + offset, ntt_tables[i]);
++        }
++        seal::util::add_poly_coeffmod(c0_old + offset, c0 + offset, coeff_count, coeff_modulus[i], c0 + offset);
++    }
++}
++
++template<class T>
++void MPHEKeygen<T>::pub_key_switch(seal::Ciphertext &ct_old, seal::Ciphertext &ct_new, seal::PublicKey &pk_new, seal::prng_seed_type* seed) {
++    auto& sk_shared_old = sharedSecretKey();
++    seal::MemoryPoolHandle pool = seal::MemoryManager::GetPool(seal::mm_prof_opt::mm_force_new, true);
++    auto& context_data = *context_.get_context_data(ct_old.parms_id());
++    auto &parms = context_data.parms();
++    auto &coeff_modulus = parms.coeff_modulus();
++    size_t coeff_modulus_size = ct_old.coeff_modulus_size();
++    size_t coeff_count = parms.poly_modulus_degree();
++    auto ntt_tables = context_data.small_ntt_tables();
++    bool bfv = parms.scheme() == seal::scheme_type::bfv;
++
++    ct_new.resize(context_, context_data.parms_id(), 2);
++    ct_new.is_ntt_form() = ct_old.is_ntt_form();
++    ct_new.scale() = ct_old.scale();
++
++    auto bootstrap_prng = (seed == nullptr) ? parms.random_generator()->create() : parms.random_generator()->create(*seed);
++    uint64_t *c0 = ct_new.data();
++    uint64_t *c1 = ct_new.data(1);
++    uint64_t *c0_old = ct_old.data();
++    uint64_t *c1_old = ct_old.data(1);
++    size_t len = coeff_count * coeff_modulus_size;
++    auto *u_i = static_cast<uint64_t *>(malloc(len * sizeof(uint64_t)));
++    vector<T> noise1(len);
++    vector<T> noise2(len);
++    vector<T> ui(len);
++    vector<T> c0_shared(len);
++    vector<T> c1_shared(len);
++    vector<T> tmp(len);
++    const vector<T>& sk_old = shared_secret_key_.data();
++    uint64_t *p0 = pk_new.data().data();
++    uint64_t *p1 = pk_new.data().data(1);
++
++
++    if(u_i == nullptr){
++        throw std::bad_alloc();
++    }
++    sample_poly_ternary(bootstrap_prng, parms, u_i);
++
++    auto noise_1(seal::util::allocate_poly(coeff_count, coeff_modulus_size, pool));
++    //sample_poly_normal_smudged(bootstrap_prng, parms, noise_1.get(), smudge);
++    sample_poly_large_uniform<T>(bootstrap_prng, parms, noise_1.get(), 16);
++    auto noise_2(seal::util::allocate_poly(coeff_count, coeff_modulus_size, pool));
++    seal::util::SEAL_NOISE_SAMPLER(bootstrap_prng, parms, noise_2.get());
++
++    for (size_t i = 0; i < coeff_modulus_size; ++i) {
++        size_t offset = i * coeff_count;
++        ntt_negacyclic_harvey(noise_1.get() + offset, ntt_tables[i]);
++        ntt_negacyclic_harvey(noise_2.get() + offset, ntt_tables[i]);
++        if(bfv){
++            ntt_negacyclic_harvey(c1_old + offset, ntt_tables[i]);
++        }
++        ntt_negacyclic_harvey(u_i + offset, ntt_tables[i]);
++    }
++    distribute_noise(noise_1.get(), noise1.size(), sk_shared_old, noise1);
++    distribute_noise(noise_2.get(), noise2.size(), sk_shared_old, noise2);
++    distribute_noise(u_i, ui.size(), sk_shared_old, ui);
++
++    dyadic_product_coeffmod_(sk_old, c1_old, len, tmp);
++    dyadic_product_coeffmod_(ui, p0, len, c0_shared);
++    add_poly_coeffmod_(tmp, c0_shared, c0_shared);
++    add_poly_coeffmod_(noise1, c0_shared, c0_shared);
++
++    dyadic_product_coeffmod_(ui, p1, len, c1_shared);
++    add_poly_coeffmod_(noise2, c1_shared, c1_shared);
++
++    open_polynomial(sk_shared_old, c0_shared, coeff_modulus, coeff_modulus_size, c0);
++    open_polynomial(sk_shared_old, c1_shared, coeff_modulus, coeff_modulus_size, c1);
++
++    for (size_t i = 0; i < coeff_modulus_size; ++i) {
++        size_t offset = i * coeff_count;
++        if(bfv){
++            inverse_ntt_negacyclic_harvey(c0 + offset, ntt_tables[i]);
++            inverse_ntt_negacyclic_harvey(c1 + offset, ntt_tables[i]);
++            inverse_ntt_negacyclic_harvey(c1_old + offset, ntt_tables[i]);
++        }
++        seal::util::add_poly_coeffmod(c0_old + offset, c0 + offset, coeff_count, coeff_modulus[i], c0 + offset);
++    }
++
++    free(u_i);
++}
++
++template<class T>
++seal::SecretKey MPHEKeygen<T>::open_secret_key() {
++    seal::SecretKey sk;
++    auto &context_data = *context_.key_context_data();
++    auto &parms = context_data.parms();
++    auto &coeff_modulus = parms.coeff_modulus();
++    shared_secret_key_.reconstruct_secret_key(sk, coeff_modulus);
++    return sk;
++}
++
++template<class T>
++void MPHEKeygen<T>::create_h0_h1_dash(const vector<T> &ui,
++                                           const uint64_t *h0_destination, const uint64_t *h1_destination,
++                                           uint64_t *h0_dash_destination, uint64_t *h1_dash_destination) {
++    auto& secretKey = sharedSecretKey();
++    size_t coeff_count = context_.key_context_data()->parms().poly_modulus_degree();
++    auto &key_context_data = *context_.key_context_data();
++    auto &key_parms = key_context_data.parms();
++    auto& modulus = key_parms.coeff_modulus();
++    size_t coeff_modulus_size = modulus.size();
++    size_t key_len = coeff_count * coeff_modulus_size;
++    seal::MemoryPoolHandle pool = seal::MemoryManager::GetPool(seal::mm_prof_opt::mm_force_new, true);
++
++    // placeholders for computation
++    vector<T> noise2(key_len);
++    vector<T> noise3(key_len);
++    vector<T> temp_big(key_len);
++    vector<T>& key = secretKey.data();
++
++    // sample noise 2 and 3
++    get_distributed_noise(noise2, coeff_count, coeff_modulus_size, key_context_data, secretKey);
++    get_distributed_noise(noise3, coeff_count, coeff_modulus_size, key_context_data, secretKey);
++
++
++    // s * h0
++    dyadic_product_coeffmod_(key, h0_destination, key_len, temp_big);
++    // s* h0 + e2
++    add_poly_coeffmod_(temp_big, noise2, temp_big);
++    // open temp_big to h0_dash
++    open_polynomial(secretKey, temp_big, modulus, coeff_modulus_size, h0_dash_destination);
++
++    // ui - s
++    sub_poly_coeffmod_(ui, key, temp_big, key_len);
++    // (ui - s) * h1
++    dyadic_product_coeffmod_(temp_big, h1_destination, key_len, temp_big);
++    // (ui - s) * h1 + e3
++    add_poly_coeffmod_(temp_big, noise3, temp_big);
++    // open temp_big to h1_dash
++    open_polynomial(secretKey, temp_big, modulus, coeff_modulus_size, h1_dash_destination);
++}
++
++template<class T>
++void MPHEKeygen<T>::create_h0_h1(const vector<T> &ui, size_t iteration,
++                                      uint64_t *h0_destination, uint64_t *h1_destination) {
++    auto& secretKey = sharedSecretKey();
++    size_t coeff_count = context_.key_context_data()->parms().poly_modulus_degree();
++    auto &key_context_data = *context_.key_context_data();
++    auto &key_parms = key_context_data.parms();
++    auto& modulus = key_parms.coeff_modulus();
++    size_t coeff_modulus_size = modulus.size();
++    size_t key_len = coeff_count * coeff_modulus_size;
++    size_t offset = iteration * coeff_count;
++    seal::MemoryPoolHandle pool = seal::MemoryManager::GetPool(seal::mm_prof_opt::mm_force_new, true);
++
++    // placeholders for computation
++    vector<T> noise0(key_len);
++    vector<T> noise1(key_len);
++    vector<T> temp_big1(key_len);
++    vector<T> temp_small(coeff_count);
++    vector<T>& key = secretKey.data();
++    SEAL_ALLOCATE_GET_COEFF_ITER(a_positive, key_len, pool)
++
++    // sample noise 0 and 1
++    get_distributed_noise(noise0, coeff_count, coeff_modulus_size, key_context_data, secretKey);
++    get_distributed_noise(noise1, coeff_count, coeff_modulus_size, key_context_data, secretKey);
++
++
++    // sample -a
++    sample_common_polynomial_PRF(h0_destination, key_parms, key_len, secretKey);
++
++    // create a
++    for (size_t i = 0; i < coeff_modulus_size; ++i) {
++        negate_poly_coeffmod(h0_destination + i * coeff_count, coeff_count, modulus[i], a_positive + i * coeff_count);
++    }
++
++    // calc -a * u
++    dyadic_product_coeffmod_(ui, h0_destination, key_len, temp_big1);
++
++    // calculate s*w for the current component
++    uint64_t factor = barrett_reduce_64(modulus.back().value(), modulus.at(iteration));
++    multiply_poly_shared_scalar(key, factor, coeff_count, temp_small, offset);
++
++    // -ua + sw
++    add_small_(temp_small, temp_big1, offset);
++
++    // add noise 0 and open polynomial to h0
++    add_poly_coeffmod_(temp_big1, noise0, temp_big1);
++    open_polynomial(secretKey, temp_big1, modulus, coeff_modulus_size, h0_destination);
++
++    // s * a
++    dyadic_product_coeffmod_(key, a_positive, key_len, temp_big1);
++    // s * a + e
++    add_poly_coeffmod_(temp_big1, noise1, temp_big1);
++
++    // open s * a + e and store to h1
++    open_polynomial(secretKey, temp_big1, modulus, coeff_modulus_size, h1_destination);
++}
++
++template<class T>
++void MPHEKeygen<T>::create_relin_keys_use_paper(seal::RelinKeys &relin_keys){
++    size_t coeff_count = context_.key_context_data()->parms().poly_modulus_degree();
++    size_t decomp_mod_count = context_.first_context_data()->parms().coeff_modulus().size();
++
++    auto &key_context_data = *context_.key_context_data();
++    auto &key_parms = key_context_data.parms();
++    size_t coeff_modulus_size = key_parms.coeff_modulus().size();
++    size_t key_len = coeff_count * coeff_modulus_size;
++    SharedSecretKey<T>& sharedSecretKey = shared_secret_key_;
++
++    auto bootstrap_prng = key_parms.random_generator()->create();
++    auto ntt_tables = key_context_data.small_ntt_tables();
++    seal::MemoryPoolHandle pool = seal::MemoryManager::GetPool(seal::mm_prof_opt::mm_force_new, true);
++
++    relin_keys.data().resize(1);
++
++    vector<T> ui(key_len);
++    vector<seal::PublicKey>& destination = relin_keys.data().at(0);
++
++    auto u_i(seal::util::allocate_poly(coeff_count, coeff_modulus_size, pool));
++    sample_poly_ternary(bootstrap_prng, key_parms, u_i.get());
++    for (size_t i = 0; i < coeff_modulus_size; ++i) {
++        ntt_negacyclic_harvey(u_i.get() + i * coeff_count, ntt_tables[i]);
++    }
++    distribute_noise(u_i.get(), ui.size(), sharedSecretKey, ui);
++
++    destination.resize(decomp_mod_count);
++
++    for (size_t j = 0; j < decomp_mod_count; ++j) {
++
++        auto& ct = destination.at(j).data();
++        ct.resize(context_, key_context_data.parms_id(), 2);
++        ct.is_ntt_form() = true;
++        ct.scale() = 1.0;
++        uint64_t *r0_destination = ct.data(0);
++        uint64_t *r1_destination = ct.data(1);
++
++        auto &key_context_data = *context_.key_context_data();
++        auto &key_parms = key_context_data.parms();
++        auto &key_modulus = key_parms.coeff_modulus();
++
++        size_t coeff_count = context_.key_context_data()->parms().poly_modulus_degree();
++        size_t coeff_modulus_size = key_parms.coeff_modulus().size();
++        size_t key_len = coeff_count * coeff_modulus_size;
++        seal::MemoryPoolHandle pool = seal::MemoryManager::GetPool(seal::mm_prof_opt::mm_force_new, true);
++
++        SEAL_ALLOCATE_GET_COEFF_ITER(h0, key_len, pool);
++        SEAL_ALLOCATE_GET_COEFF_ITER(h1, key_len, pool);
++        SEAL_ALLOCATE_GET_COEFF_ITER(h0_dash, key_len, pool);
++        SEAL_ALLOCATE_GET_COEFF_ITER(h1_dash, key_len, pool);
++
++        create_h0_h1(ui, j, h0, h1);
++        create_h0_h1_dash(ui, h0, h1, h0_dash, h1_dash);
++
++        // set rlk(1)
++        memcpy(r1_destination, h1, key_len * sizeof(uint64_t));
++        CoeffIter r0_iter(r0_destination);
++
++        // set rlk(0) = h0_dash + h1_dash
++        for (size_t i = 0; i < coeff_modulus_size; ++i) {
++            add_poly_coeffmod(h0_dash + i * coeff_count, h1_dash + i * coeff_count, coeff_count, key_modulus[i], r0_iter + i * coeff_count);
++        }
++
++    }
++
++    relin_keys.parms_id() = key_context_data.parms_id();
++}
++
++template<class T>
++void MPHEKeygen<T>::bootstrap_mpc_part(seal::Ciphertext& ct_old, seal::Ciphertext& ct_new, uint64_t* m_positive, double smudge, seal::prng_seed_type* seed){
++    seal::MemoryPoolHandle pool = seal::MemoryManager::GetPool(seal::mm_prof_opt::mm_force_new, true);
++    auto& context_data = *context_.get_context_data(ct_old.parms_id());
++    auto &parms = context_data.parms();
++    auto &coeff_modulus = parms.coeff_modulus();
++    size_t coeff_modulus_size = coeff_modulus.size();
++    size_t coeff_count = parms.poly_modulus_degree();
++    auto& first_context = *context_.first_context_data();
++    auto& first_parms = first_context.parms();
++    auto ntt_tables = first_context.small_ntt_tables();
++    auto& coeff_mod_long = first_parms.coeff_modulus();
++    size_t coeff_modulus_size_new = shared_secret_key_.coeff_modulus_size_ - 1;
++    if(coeff_modulus_size_new == 0)
++        coeff_modulus_size_new++;
++    bool bfv = parms.scheme() == seal::scheme_type::bfv;
++    // these plaintexts are only relevant for ckks
++    seal::Plaintext mod_switched;
++    if(bfv){
++        ct_new = ct_old;
++        //print_polynomial(ct_old.data(), coeff_count, to_string(coeff_modulus.at(0).value()) + string(": "));
++        //print_polynomial(ct_old.data(1), coeff_count, to_string(coeff_modulus.at(0).value()) + string(": "));
++        if(coeff_modulus_size_new != coeff_modulus_size){
++            std::cout << "BS: Ciphertext sizes do not match!" << std::endl;
++            std::cout << "(old, new) " << coeff_modulus_size << ", " << coeff_modulus_size_new << std::endl;
++            exit(-1);
++        }
++    } else {
++        ct_new.resize(context_, first_context.parms_id(), 2);
++        ct_new.is_ntt_form() = true;
++        ct_new.scale() = ct_old.scale();
++        mod_switched.parms_id() = seal::parms_id_zero;
++        mod_switched.resize(coeff_count * coeff_modulus_size_new);
++        mod_switched.parms_id() = ct_new.parms_id();
++        mod_switched.scale() = ct_old.scale();
++    }
++    auto bootstrap_prng = (seed == nullptr) ? parms.random_generator()->create() : parms.random_generator()->create(*seed);
++    size_t len = coeff_count * coeff_modulus_size;
++    size_t len_new = coeff_count * coeff_modulus_size_new;
++    vector<T> noise1(len);
++    vector<T> noise2(len_new);
++    vector<T> M_positive(len_new);
++    vector<T> M_negative(len);
++    vector<T> tmp(len);
++    vector<T> tmp2(len_new);
++
++    auto *a_negative = static_cast<uint64_t *>(calloc(len_new, sizeof(uint64_t)));
++    auto *m_negative = static_cast<uint64_t *>(calloc(len, sizeof(uint64_t)));
++
++    uint64_t *c1_old = ct_old.data(1);
++    uint64_t *c0_new = ct_new.data();
++    uint64_t *c1_new = ct_new.data(1);
++
++    auto noise_1(seal::util::allocate_poly(coeff_count, coeff_modulus_size, pool));
++    sample_poly_large_uniform<T>(bootstrap_prng, parms, noise_1.get(), 16 * smudge);
++    auto noise_2(seal::util::allocate_poly(coeff_count, coeff_modulus_size_new, pool));
++    seal::util::SEAL_NOISE_SAMPLER(bootstrap_prng, first_parms, noise_2.get());
++
++    // We sample our c1 new as our "a" and save -a in a_negative
++    sample_common_polynomial_PRF(c1_new, first_parms, len_new, shared_secret_key_);
++    if(bfv){
++        sample_scaled_plaintext_polynomial(coeff_count, 0, context_data, m_positive);
++        for (size_t i = 0; i < coeff_modulus_size; ++i) {
++            size_t offset = i * coeff_count;
++            seal::util::negate_poly_coeffmod(c1_new + offset, coeff_count, coeff_modulus[i],
++                                            a_negative + offset);
++            seal::util::negate_poly_coeffmod(m_positive + offset, coeff_count, coeff_modulus[i],
++                                            m_negative + offset);
++            ntt_negacyclic_harvey(noise_1.get() + offset, ntt_tables[i]);
++            ntt_negacyclic_harvey(noise_2.get() + offset, ntt_tables[i]);
++            ntt_negacyclic_harvey(m_positive + offset, ntt_tables[i]);
++            ntt_negacyclic_harvey(m_negative + offset, ntt_tables[i]);
++            ntt_negacyclic_harvey(c1_old + offset, ntt_tables[i]);
++        }
++    } else {
++        sample_ckks_poly(context_, first_context.parms_id(), m_positive);
++        memcpy(mod_switched.data(), m_positive, len_new * sizeof(uint64_t));
++        seal::Evaluator evaluator(context_);
++        evaluator.mod_switch_to_inplace(mod_switched, ct_old.parms_id());
++        for (size_t i = 0; i < coeff_modulus_size; ++i) {
++            size_t offset = i * coeff_count;
++            ntt_negacyclic_harvey(noise_1.get() + offset, ntt_tables[i]);
++            seal::util::negate_poly_coeffmod(mod_switched.data() + offset, coeff_count, coeff_mod_long[i],
++                                            m_negative + offset);
++        }
++        for (size_t i = 0; i < coeff_modulus_size_new; ++i) {
++            size_t offset = i * coeff_count;
++            seal::util::negate_poly_coeffmod(c1_new + offset, coeff_count, coeff_mod_long[i],
++                                            a_negative + offset);
++            ntt_negacyclic_harvey(noise_2.get() + offset, ntt_tables[i]);
++        }
++    }
++    distribute_noise(noise_1.get(), noise1.size(), shared_secret_key_, noise1);
++    distribute_noise(noise_2.get(), noise2.size(), shared_secret_key_, noise2);
++    distribute_noise(m_positive, len_new, shared_secret_key_, M_positive);
++    distribute_noise(m_negative, len, shared_secret_key_, M_negative);
++    // s_i * c_1 = tmp
++    dyadic_product_coeffmod_(shared_secret_key_.data(), c1_old, len, tmp);
++    // tmp + Delta M = tmp
++    add_poly_coeffmod_(tmp, M_negative, tmp);
++    // tmp + e_0 = tmp = h0
++    add_poly_coeffmod_(tmp, noise1, tmp);
++    // h0 = s * c1 + Delta_M + e0 -> saved in m_positive
++    open_polynomial(shared_secret_key_, tmp, coeff_modulus, coeff_modulus_size, m_positive);
++
++    // s_i * (-a) = tmp
++    dyadic_product_coeffmod_(shared_secret_key_.data(), a_negative, len_new, tmp2);
++    // tmp + (- Delta M) = tmp
++    add_poly_coeffmod_(tmp2, M_positive, tmp2);
++    // tmp + e_1 = tmp = h1
++    add_poly_coeffmod_(tmp2, noise2, tmp2);
++    // set m_negative to our h1
++    open_polynomial(shared_secret_key_, tmp2, coeff_mod_long, coeff_modulus_size_new, c0_new);
++
++    for(size_t i = 0; i < coeff_modulus_size && bfv; ++i){
++        size_t offset = i * coeff_count;
++        inverse_ntt_negacyclic_harvey(c1_old + offset, ntt_tables[i]);
++        inverse_ntt_negacyclic_harvey(m_positive + offset, ntt_tables[i]);
++        inverse_ntt_negacyclic_harvey(c0_new + offset, ntt_tables[i]);
++        inverse_ntt_negacyclic_harvey(c1_new + offset, ntt_tables[i]);
++    }
++    /*
++    print_polynomial(c0_new, coeff_count, string("c0 new ") + to_string(coeff_modulus.at(0).value()) + string(": "));
++    print_polynomial(c1_new, coeff_count, string("c1 new ") + to_string(coeff_modulus.at(0).value()) + string(": "));
++    print_polynomial(m_positive, coeff_count, string("h0 new ") + to_string(coeff_modulus.at(0).value()) + string(": "));
++    */
++    free(a_negative);
++    free(m_negative);
++}
++
++
++inline void conclude_bootstrap(seal::Ciphertext& ct_old, seal::Ciphertext& ct_new, uint64_t* h0, seal::SEALContext& context){
++    seal::MemoryPoolHandle pool = seal::MemoryManager::GetPool(seal::mm_prof_opt::mm_force_new, true);
++    auto& context_data = *context.get_context_data(ct_old.parms_id());
++    auto &parms = context_data.parms();
++    auto &coeff_modulus = parms.coeff_modulus();
++    size_t coeff_modulus_size = coeff_modulus.size();
++    size_t coeff_count = parms.poly_modulus_degree();
++    auto& first_context = *context.first_context_data();
++    auto& first_parms = first_context.parms();
++    auto& coeff_mod_long = first_parms.coeff_modulus();
++    size_t coeff_modulus_size_new = coeff_mod_long.size() - 1;
++    bool bfv = parms.scheme() == seal::scheme_type::bfv;
++    size_t len = coeff_count * coeff_modulus_size;
++    uint64_t *c0_old = ct_old.data();
++    uint64_t *c0_new = ct_new.data();
++    // compute h_0 = [c_0 + h_0]_q
++    RNSIter h0_iter(h0, coeff_count);
++    RNSIter c0_iter(c0_old, coeff_count);
++    RNSIter c0_new_iter(c0_new, coeff_count);
++    add_poly_coeffmod(h0_iter, c0_iter, coeff_modulus_size, coeff_modulus, h0_iter);
++    seal::Plaintext masked_plaintext;
++    masked_plaintext.parms_id() = seal::parms_id_zero;
++    if(bfv){
++        // perform downscaling of h_0
++        // t/q * h_0 -> saved to plaintext object
++        masked_plaintext.resize(coeff_count);
++        context_data.rns_tool()->decrypt_scale_and_round(h0_iter, masked_plaintext.data(), pool);
++        // Now we need to scale the plaintext back up. Multiplying by Delta according to RNS encryption rules.
++        // After up-scaling we can add h1 to our masked plaintext to remove the mask and create a fresh encryption.
++        multiply_add_plain_with_scaling_variant(masked_plaintext, context_data, c0_new_iter);
++    } else {
++        masked_plaintext.resize(coeff_count * coeff_modulus_size);
++        masked_plaintext.parms_id() = ct_old.parms_id();
++        masked_plaintext.scale() = ct_old.scale();
++        memcpy(masked_plaintext.data(), h0, len * sizeof(uint64_t));
++        extend_ckks_plaintext(masked_plaintext, context, ct_new.scale());
++        add_poly_coeffmod({masked_plaintext.data(), coeff_count}, c0_new_iter, coeff_modulus_size_new, coeff_mod_long, c0_new_iter);
++    }
++}
++
++template<class T>
++void MPHEKeygen<T>::collective_bootstrap(seal::Ciphertext &ct_old, seal::Ciphertext &ct_new, double smudge, seal::prng_seed_type* seed) {
++    auto& context_data = *context_.get_context_data(ct_old.parms_id());
++    auto &parms = context_data.parms();
++    size_t coeff_modulus_size_new = shared_secret_key_.coeff_modulus_size_ - 1;
++    size_t coeff_count = parms.poly_modulus_degree();
++    size_t len = coeff_count * coeff_modulus_size_new;
++    auto *h0 = static_cast<uint64_t *>(calloc(len, sizeof(uint64_t)));
++    bootstrap_mpc_part(ct_old, ct_new, h0, smudge, seed);
++    conclude_bootstrap(ct_old, ct_new, h0, context_);
++    free(h0);
++}
++
++template<class T>
++void MPHEKeygen<T>::create_decryption_phase(seal::Ciphertext& ct, seal::Plaintext& plaintext, seal::prng_seed_type* seed){
++    seal::MemoryPoolHandle pool = seal::MemoryManager::GetPool(seal::mm_prof_opt::mm_force_new, true);
++    auto& context_data = *context_.get_context_data(ct.parms_id());
++    auto &parms = context_data.parms();
++    auto &coeff_modulus = parms.coeff_modulus();
++    size_t coeff_modulus_size = coeff_modulus.size();
++    size_t coeff_count = parms.poly_modulus_degree();
++    auto ntt_tables = context_data.small_ntt_tables();
++    bool bfv = parms.scheme() == seal::scheme_type::bfv;
++    plaintext.parms_id() = seal::parms_id_zero;
++
++    auto bootstrap_prng = (seed == nullptr) ? parms.random_generator()->create() : parms.random_generator()->create(*seed);
++    size_t len = coeff_count * coeff_modulus_size;
++    vector<T> noise1(len);
++    vector<T> tmp(len);
++    
++    uint64_t *c1_old = ct.data(1);
++    auto *h0 = static_cast<uint64_t *>(calloc(len, sizeof(uint64_t)));
++    auto noise_1(seal::util::allocate_poly(coeff_count, coeff_modulus_size, pool));
++
++
++    sample_poly_large_uniform<T>(bootstrap_prng, parms, noise_1.get(), 4);
++
++    for (size_t i = 0; i < coeff_modulus_size; ++i) {
++        size_t offset = i * coeff_count;
++        ntt_negacyclic_harvey(noise_1.get() + offset, ntt_tables[i]);
++        if(bfv){
++            ntt_negacyclic_harvey(c1_old + offset, ntt_tables[i]);
++        }
++    }
++
++    distribute_noise(noise_1.get(), noise1.size(), shared_secret_key_, noise1);
++    // s_i * c_1 = tmp
++    dyadic_product_coeffmod_(shared_secret_key_.data(), c1_old, len, tmp);
++    // tmp + e_0 = tmp = h0
++    add_poly_coeffmod_(tmp, noise1, tmp);
++    // h0 = s * c1 + e0 -> saved in tmp_clear
++    open_polynomial(shared_secret_key_, tmp, coeff_modulus, coeff_modulus_size, h0);
++
++    plaintext.resize(len);
++    for (size_t i = 0; i < coeff_modulus_size; ++i) {
++        size_t offset = i * coeff_count;
++        if(bfv){
++            inverse_ntt_negacyclic_harvey(h0 + offset, ntt_tables[i]);
++            inverse_ntt_negacyclic_harvey(c1_old + offset, ntt_tables[i]);
++        }
++    }
++    memcpy(plaintext.data(), h0, len * sizeof(uint64_t));
++    free(h0);
++}
++
++
++inline void conclude_decryption(seal::Ciphertext& ct, seal::Plaintext& plaintext, seal::SEALContext& context){
++    std::cout << "Conclude decryption" << std::endl;
++    seal::MemoryPoolHandle pool = seal::MemoryManager::GetPool(seal::mm_prof_opt::mm_force_new, true);
++    auto& context_data = *context.get_context_data(ct.parms_id());
++    auto &parms = context_data.parms();
++    auto &coeff_modulus = parms.coeff_modulus();
++    size_t coeff_modulus_size = coeff_modulus.size();
++    size_t coeff_count = parms.poly_modulus_degree();
++    bool bfv = parms.scheme() == seal::scheme_type::bfv;
++    plaintext.parms_id() = seal::parms_id_zero;
++    size_t len = coeff_count * coeff_modulus_size;
++    uint64_t *c0_old = ct.data();
++    auto *h0 = static_cast<uint64_t *>(calloc(len, sizeof(uint64_t)));
++    // compute h_0 = [c_0 + h_0]_q
++    RNSIter h0_iter(h0, coeff_count);
++    RNSIter c0_iter(c0_old, coeff_count);
++    RNSIter pt_iter(plaintext.data(), coeff_count);
++
++    if(bfv){
++        add_poly_coeffmod(pt_iter, c0_iter, coeff_modulus_size, coeff_modulus, h0_iter);
++        plaintext.resize(coeff_count);
++        context_data.rns_tool()->decrypt_scale_and_round(h0_iter, plaintext.data(), pool);
++    }
++    else {
++        plaintext.resize(len);
++        add_poly_coeffmod(h0_iter, c0_iter, coeff_modulus_size, coeff_modulus, pt_iter);
++        plaintext.parms_id() = ct.parms_id();
++        plaintext.scale() = ct.scale();
++    }
++
++    free(h0);
++}
++
++template<class T>
++void MPHEKeygen<T>::collective_decrypt(seal::Ciphertext &ct, seal::Plaintext &plaintext, seal::prng_seed_type* seed) {
++    create_decryption_phase(ct, plaintext, seed);
++    conclude_decryption(ct, plaintext, context_);
++}
++
+diff --git a/MPHE/SharedSecretKey.h b/MPHE/SharedSecretKey.h
+new file mode 100644
+index 00000000..6bd90a30
+--- /dev/null
++++ b/MPHE/SharedSecretKey.h
+@@ -0,0 +1,203 @@
++
++#ifndef CODE_SHAREDSECRETKEY_H
++#define CODE_SHAREDSECRETKEY_H
++#define NO_MIXED_CIRCUITS
++
++
++#include <Processor/BaseMachine.h>
++#include "rlweHelper.h"
++#include "Math/gfp.h"
++#include "params.h"
++
++template<class T>
++class SharedSecretKey;
++
++template<class T>
++void open_polynomial(SharedSecretKey<T>&, const vector<T>&, const vector<seal::Modulus>&, size_t, uint64_t*);
++
++template<class T>
++void bigint_to_uintmod(size_t coeff_mod_size, size_t coeff_count, const vector<seal::Modulus>& modulus,
++                       const vector<typename T::clear>& res, uint64_t* result);
++
++template<class T>
++class SharedSecretKey {
++
++public:
++
++    SharedSecretKey() = delete;
++
++    SharedSecretKey(const SharedSecretKey<T>& copy) = delete;
++
++    SharedSecretKey(SharedSecretKey<T>&& other) = delete;
++
++    void reconstruct_secret_key(seal::SecretKey& sk, const vector<seal::Modulus>& modulus);
++
++    SharedSecretKey(const seal::SecretKey& sk, Player& P, const seal::SEALContext& context, ProtocolSet<T>& set, bool dummy = false)
++            : DUMMY(dummy), P_(P), set_(set), input_(set.input), protocol_(set.protocol), output_(set.output), sk_share_(sk)
++    {
++        // Timer timer;
++        // timer.start();
++        if(DUMMY){
++            cerr << "Warning INSECURE instance" << endl;
++        }
++        auto &context_data = *context.key_context_data();
++        auto &parms = context_data.parms();
++        auto &coeff_modulus = parms.coeff_modulus();
++        coeff_count_ = parms.poly_modulus_degree();
++        coeff_modulus_size_ = coeff_modulus.size();
++        
++        init_sk();
++        // timer.stop();
++        // cout << "SK Generation: " << timer.elapsed() << endl;
++    }
++
++    typename T::clear openShare(T share);
++
++    inline vector<T>& data(){
++        return data_;
++    }
++
++    T constant(typename T::clear el);
++
++    inline ProtocolSet<T>& protocol_set(){
++        return set_;
++    }
++    inline Player& P(){
++        return P_;
++    }
++    inline typename T::Input& input(){
++        return input_;
++    }
++    inline typename T::Protocol& protocol(){
++        return protocol_;
++    }
++    inline typename T::MAC_Check& output(){
++        return output_;
++    }
++
++
++    ~SharedSecretKey() {
++        set_.check();
++    }
++
++    size_t coeff_count_ = 0;
++    size_t coeff_modulus_size_ = 0;
++
++    inline void prepare_open(std::vector<T>* poly, uint64_t* destination, const vector<seal::Modulus>& modulus){
++        if(pending_open_values.empty()){
++            output_.init_open(P_);
++        }
++        for (auto share: *poly) {
++            output_.prepare_open(share);
++        }
++
++        pending_open_values.emplace_back(destination, modulus);
++    }
++
++    inline void finalize_open(){
++        if(pending_open_values.empty()){
++            return;
++        }
++
++        output_.exchange(P_);
++
++        map<uint64_t*, tuple<vector<typename T::clear>, const vector<seal::Modulus>*>> results_map;
++        for (auto [destination, modulus] : pending_open_values) {
++            vector<typename T::clear> res(modulus.size() * coeff_count_);
++            for (auto& clear: res) {
++                clear = output_.finalize_open();
++            }
++
++            results_map[destination] = tuple<vector<typename T::clear>, const vector<seal::Modulus>*>(res, &modulus);
++        }
++
++        set_.check();
++
++        for (auto& entry: results_map) {
++            auto res = get<0>(entry.second);
++            auto modulus = get<1>(entry.second);
++            bigint_to_uintmod<T>(coeff_modulus_size_, coeff_count_, *modulus,
++                                 res, entry.first);
++        }
++
++        pending_open_values.clear();
++    }
++
++private:
++
++    void init_sk();
++
++    bool DUMMY;
++    Player& P_;
++    ProtocolSet<T>& set_;
++    typename T::Input& input_;
++    typename T::Protocol& protocol_;
++    typename T::MAC_Check& output_;
++
++    const seal::SecretKey& sk_share_;
++    std::vector<T> data_;
++
++    std::vector<std::tuple<uint64_t*, const vector<seal::Modulus>&>> pending_open_values;
++
++};
++
++
++template<class T>
++void SharedSecretKey<T>::init_sk()
++{
++    int num_players = P_.num_players();
++    data_ = std::vector<T>(seal::util::mul_safe(coeff_count_, coeff_modulus_size_));
++
++    // input protocol
++    //auto& input_ = proc_.input;
++    
++
++    input_.reset_all(P_);
++    uint64_t zero = 0;
++
++    for (size_t i = 0; i < coeff_modulus_size_ * coeff_count_; ++i) {
++        const size_t* sk_data  = sk_share_.data().data() + i;
++        if(DUMMY){
++            sk_data = &zero;
++        }
++
++        MPHE_PARAMS::field tmp = *sk_data;
++        input_.add_from_all(tmp);
++    }
++    input_.exchange();
++    for (size_t i = 0; i < coeff_modulus_size_ * coeff_count_; ++i) {
++        std::vector<T> current_coeff(num_players);
++        for (int j = 0; j < num_players; ++j) {
++            current_coeff.at(j) = input_.finalize(j);
++        }
++        data_.at(i) = current_coeff.at(0);
++        for (int j = 1; j < num_players; ++j) {
++            data_.at(i) += current_coeff.at(j);
++        }
++    }
++}
++
++template<class T>
++void SharedSecretKey<T>::reconstruct_secret_key(seal::SecretKey& sk, const vector<seal::Modulus>& modulus) {
++    sk = sk_share_;
++    uint64_t* result = sk.data().data();
++    open_polynomial(*this, data_, modulus, modulus.size(), result);
++}
++
++template<class T>
++typename T::clear SharedSecretKey<T>::openShare(T share) {
++    output_.init_open(P_);
++    output_.prepare_open(share);
++    output_.exchange(P_);
++    typename T::clear result = output_.finalize_open();
++    set_.check();
++    return result;
++}
++
++template<class T>
++T SharedSecretKey<T>::constant(typename T::clear el) {
++    return T::constant(el, P_.my_num(), output_.get_alphai());
++}
++
++
++#endif //CODE_SHAREDSECRETKEY_H
+diff --git a/MPHE/benchmark-mphe-party.cpp b/MPHE/benchmark-mphe-party.cpp
+new file mode 100644
+index 00000000..736a8c15
+--- /dev/null
++++ b/MPHE/benchmark-mphe-party.cpp
+@@ -0,0 +1,43 @@
++#include "benchmark.h"
++
++char argv0[256] = "./bench\0";
++char argv1[256] = "-p\0";
++char argv2_client[256] = "0\0"; // Select number
++char argv2_server[256] = "1\0"; // Select number
++char argv3[256] = "-pn\0";
++char argv4[256] = "8080\0"; // Replace with port
++char argv5[256] = "-ip\0";
++char argv6[256] = "HOSTS\0";
++char argv7[256] = "-N\0";
++char argv8[256] = "2\0";
++char* last = nullptr;
++
++const char* argv_client[10] = {argv0, argv1, argv2_client, argv3, argv4, 
++                                argv5, argv6, argv7, argv8, last};
++const char* argv_server[10] = {argv0, argv1, argv2_server, argv3, argv4, 
++                                argv5, argv6, argv7, argv8, last};
++int argc = 9;
++
++void bench_client(){
++    std::cout << "bench client" << std::endl;
++    Benchmark::execute_all_protocols_bfv(argc, &(argv_client[0]));
++}
++
++void bench_server(){
++    std::cout << "bench server" << std::endl;
++    Benchmark::execute_all_protocols_bfv(argc, &(argv_server[0]));
++}
++
++int main(int argc, const char** argv) {
++    if(argc == 1){
++        clone(&bench_client);
++        clone(&bench_server);
++        pid_t wpid;
++        int status = 0;
++        while ((wpid = wait(&status)) > 0);
++        std::cout << "Client and server finished the benchmarks" << std::endl;
++    } else {
++        Benchmark::execute_all_protocols_bfv(argc, argv);
++    }
++    return 0;
++}
+diff --git a/MPHE/benchmark.h b/MPHE/benchmark.h
+new file mode 100644
+index 00000000..7bb806be
+--- /dev/null
++++ b/MPHE/benchmark.h
+@@ -0,0 +1,695 @@
++//
++// Created by fable on 27.03.22.
++//
++
++#ifndef CODE_BENCHMARK_H
++#define CODE_BENCHMARK_H
++#define NUMBER_SHARES 5
++#define NUMBER_FUNCTIONS 14
++#define NUM_RUNS_BENCHMARK 1
++
++
++#include <iostream>
++#include "seal/seal.h"
++#include <chrono>
++#include "mpheAPI.h"
++
++namespace Benchmark{
++
++    static constexpr const char* Mascot_string    = "MASCOT";
++    static constexpr const char* Semi_string      = "Semi";
++    static constexpr const char* Shamir_string    = "Shamir";
++    static constexpr const char* malShamir_string = "Mal Shamir";
++    static constexpr const char* CowGear_string   = "Cow Gear";
++
++    static constexpr const char* SK_string           = "Sk generation         ";
++    static constexpr const char* PK_string           = "Pk generation         ";
++    static constexpr const char* Boot_string         = "Bootstrap             ";
++    static constexpr const char* Switch_sk_string    = "Switch sk             ";
++    static constexpr const char* Switch_pk_string    = "Switch pk             ";
++    static constexpr const char* Dec_string          = "Decrypt               ";
++    static constexpr const char* Relin_string        = "Relin key generation  ";
++    static constexpr const char* Relin_paper_string  = "Relin paper keyGen    ";
++    static constexpr const char* Galois_string       = "Galois key generation ";
++    static constexpr const char* Setup_string        = "MPC Setup             ";
++    static constexpr const char* MUL_string          = "Generate Triples      ";
++    static constexpr const char* IN_string           = "Generate Polynomial   ";
++
++    enum share_type {
++        MASCOT, SEMI, SHAMIR, MAL_SHAMIR, COW_GEAR, VOID_SHARE
++    };
++    enum function_type {
++        SK_GEN, PK_GEN, BOOT, SWITCH_SK, SWITCH_PK, DECRYPT, RELIN, RELIN_PAPER, GALOIS, SETUP, MUL, IN, VOID_FUNCTION
++    };
++
++    static const share_type share_type_array[NUMBER_SHARES] = {MASCOT, SEMI, SHAMIR, MAL_SHAMIR, COW_GEAR};
++    static const function_type function_type_array[NUMBER_FUNCTIONS] =
++            {SK_GEN, PK_GEN, BOOT, SWITCH_SK,SWITCH_PK, DECRYPT,
++             RELIN, RELIN_PAPER, GALOIS, SETUP, MUL, IN};
++
++    static const char* share_string(share_type type){
++        switch (type) {
++            case MASCOT:
++                return Mascot_string;
++            case SEMI:
++                return Semi_string;
++            case SHAMIR:
++                return Shamir_string;
++            case MAL_SHAMIR:
++                return malShamir_string;
++            case COW_GEAR:
++                return CowGear_string;
++            case VOID_SHARE:
++                cerr << "VOID SHARE DOES NOT EXIST" << endl;
++                return "";
++            default:
++                return "";
++        }
++    }
++    static const char* function_string(function_type type){
++        switch (type) {
++            case SK_GEN:
++                return SK_string;
++            case PK_GEN:
++                return PK_string;
++            case BOOT:
++                return Boot_string;
++            case SWITCH_SK:
++                return Switch_sk_string;
++            case SWITCH_PK:
++                return Switch_pk_string;
++            case DECRYPT:
++                return Dec_string;
++            case RELIN:
++                return Relin_string;
++            case RELIN_PAPER:
++                return Relin_paper_string;
++            case GALOIS:
++                return Galois_string;
++            case SETUP:
++                return Setup_string;
++            case MUL:
++                return MUL_string;
++            case IN:
++                return IN_string;
++            case VOID_FUNCTION:
++                cerr << "VOID FUNCTION DOES NOT EXIST" << endl;
++                return "";
++            default:
++                return "";
++        }
++    }
++    class benchmark {
++    public:
++
++        benchmark(){
++            for (auto i : share_type_array) {
++                for (auto j : function_type_array) {
++                    times_map[i][j] = vector<double>();   
++                }
++            }
++        }
++
++        ~benchmark(){
++          print_timer_map();
++          print_net_map();
++        }
++
++        void set_current_share(share_type type){
++            if(type == VOID_SHARE){
++                throw logic_error("cannot set void share");
++            }
++            cout << endl << "#####################################################" << endl;
++            cout << "Starting tests with share type: " << share_string(type) << endl;
++            cout << "#####################################################" << endl << endl;
++            current_share = type;
++        }
++        void set_current_function(function_type type){
++            if(type == VOID_FUNCTION){
++                throw logic_error("cannot set void function");
++            }
++            if(type == SETUP){
++                reset_net();
++            }
++            cout << endl << "-----------------------------------------------------" << endl;
++            cout << "Testing function: " << function_string(type) << endl;
++            cout << "-----------------------------------------------------" << endl << endl;
++            current_function = type;
++        }
++        void check_current(){
++            if(current_function == VOID_FUNCTION || current_share == VOID_SHARE){
++                throw logic_error("VOID FUNCTION OR VOID SHARE");
++            }
++        }
++        void reset_net(){
++            P = nullptr;
++        }
++
++        template<class T>
++        void set_net(mpheAPI<T>& api){
++            P = &api.P();
++        }
++
++        template<class T>
++        void start(){
++            check_current();
++            if(P != nullptr){
++                size_t data = P->total_comm().sent;
++                network_map[current_share][current_function].emplace_back(data);
++            }
++            timer.reset();
++            timer.start();
++        }
++
++        template<class T>
++        void start(function_type type){
++            set_current_function(type);
++            start<T>();
++        }
++
++        template<class T>
++        void stop(){
++            check_current();
++            if(P != nullptr){
++                size_t data = P->total_comm().sent;
++                auto& stats = network_map.at(current_share).at(current_function).back();
++                stats = data - stats;
++            }
++            timer.stop();
++            times_map[current_share][current_function].emplace_back(timer.elapsed() * 1e3);
++        }
++
++        void print_timer_map(){
++            if(my_num != 0){
++                return;
++            }
++            string filename = string("time_bench.txt");
++            ofstream MyFile(filename);
++            cout << endl << "TIMING BENCHMARKS" << endl;
++            for(auto const& [shareType , bench_map] : times_map){
++                MyFile << share_string(shareType) << endl;
++                cout << endl << share_string(shareType) << endl;
++                for (const auto& [functionType, entry]: bench_map) {
++                    if(entry.empty()){
++                      continue;
++                    }
++                    double sum = std::accumulate(entry.begin(), entry.end(), 0.0);
++                    double mean = sum / (double)entry.size();
++                    std::vector<double> diff(entry.size());
++                    std::transform(entry.begin(), entry.end(), diff.begin(), [mean](double x) {return x - mean;});
++                    double sq_sum = std::inner_product(diff.begin(), diff.end(), diff.begin(), 0.0);
++                    double stdev = std::sqrt(sq_sum / (double)entry.size());
++                    MyFile << "\t" << function_string(functionType) << "," << mean << "," << stdev << endl;
++                    cout << function_string(functionType) << '\t' << mean << " ms\t" << stdev << " ms" << endl;
++                }
++            }
++
++            MyFile.close();
++            cout << "---------------------------------------------------------" << endl << endl << endl;
++        }
++
++        void print_net_map(){
++            if(my_num != 0){
++                return;
++            }
++            string filename = string("network_bench.txt");
++            ofstream MyFile(filename);
++            cout << endl << "NETWORK BENCHMARKS" << endl;
++            for(auto& [shareType, net_map] : network_map){
++                MyFile << share_string(shareType) << endl;
++                cout << endl << share_string(shareType) << endl;
++                for(auto& [functionType, comm_stats] : net_map){
++                    if(comm_stats.empty()){
++                      continue;
++                    }
++                    double sum = std::accumulate(comm_stats.begin(), comm_stats.end(), 0.0);
++                    double mean = sum / (double)comm_stats.size();
++                    MyFile << "\t" << function_string(functionType) << "," << 1e-6 * mean << endl;
++                    cout << function_string(functionType) << '\t' << 1e-6 * mean << " mb" << endl;
++                }
++            }
++
++            MyFile.close();
++            cout << "---------------------------------------------------------" << endl << endl << endl;
++        }
++
++        void set_my_num(size_t num){
++            my_num = num;
++        }
++
++        template<class T>
++        void bench_sk_gen(mpheAPI<T>& api){
++            set_net(api);
++            start<T>(SK_GEN);
++            api.create_new_key();
++            stop<T>();
++        }
++
++        template<class T>
++        void bench_pk_gen(mpheAPI<T>& api){
++            set_net(api);
++            auto& key = api.create_new_key();
++            start<T>(PK_GEN);
++            api.create_new_pk(key);
++            stop<T>();
++        }
++        
++        template<class T>
++        void bench_bootstrap(mpheAPI<T>& api){
++            set_net(api);
++            auto& key = api.get_default_key();
++            auto sk = api.open_secret_key(key);
++            auto pk = api.get_pk(key);
++            seal::Plaintext pt("10");
++            seal::Ciphertext ct, ct_new;
++            seal::Encryptor encryptor(api.context(), pk);
++            encryptor.encrypt(pt, ct);
++            api.exchange_ciphertext(ct, 0);
++            start<T>(BOOT);
++            api.collective_bootstrap(ct, ct_new, key);
++            stop<T>();
++            seal::Decryptor decryptor(api.context(), sk);
++            decryptor.decrypt(ct_new, pt);
++            // cout << "bootstrap expected: 10" << endl;
++            // cout << "bootstrap received: " << pt.to_string() << endl;
++        }
++        template<class T>
++        void bench_switch_sk(mpheAPI<T>& api){
++            set_net(api);
++            auto& key = api.get_default_key();
++            auto& key_2 = api.create_new_key();
++            auto sk = api.open_secret_key(key_2);
++            auto pk = api.get_pk(key);
++            seal::Plaintext pt("10");
++            seal::Ciphertext ct, ct_new;
++            seal::Encryptor encryptor(api.context(), pk);
++            encryptor.encrypt(pt, ct);
++            api.exchange_ciphertext(ct, 0);
++            start<T>(SWITCH_SK);
++            api.switch_secret_key(ct, ct_new, key, key_2);
++            stop<T>();
++
++            seal::Decryptor decryptor(api.context(), sk);
++            decryptor.decrypt(ct_new, pt);
++            // cout << "switch sk expected: 10" << endl;
++            // cout << "switch sk received: " << pt.to_string() << endl;
++        }
++        template<class T>
++        void bench_switch_pk(mpheAPI<T>& api){
++            set_net(api);
++            auto& key = api.get_default_key();
++            auto& key_2 = api.create_new_key();
++            auto sk = api.open_secret_key(key_2);
++            auto pk = api.get_pk(key);
++            seal::Plaintext pt("10");
++            seal::Ciphertext ct, ct_new;
++            seal::Encryptor encryptor(api.context(), pk);
++            encryptor.encrypt(pt, ct);
++            api.exchange_ciphertext(ct, 0);
++            start<T>(SWITCH_PK);
++            api.switch_public_key(ct, ct_new, key, key_2.get_pk_shared());
++            stop<T>();
++
++            seal::Decryptor decryptor(api.context(), sk);
++            decryptor.decrypt(ct_new, pt);
++            // cout << "switch pk expected: 10" << endl;
++            // cout << "switch pk received: " << pt.to_string() << endl;
++        }
++        template<class T>
++        void bench_decrypt(mpheAPI<T>& api){
++            set_net(api);
++            auto& key = api.get_default_key();
++            auto pk = api.get_pk(key);
++
++            seal::Plaintext pt("10");
++            seal::Ciphertext ct, ct_new;
++            seal::Encryptor encryptor(api.context(), pk);
++            encryptor.encrypt(pt, ct);
++            api.exchange_ciphertext(ct, 0);
++            start<T>(DECRYPT);
++            api.decrypt(ct, pt, key);
++            stop<T>();
++
++            // cout << "decrypt expected: 10" << endl;
++            // cout << "decrypt received: " << pt.to_string() << endl;
++        }
++        template<class T>
++        void bench_relin(mpheAPI<T>& api){
++            set_net(api);
++            auto& key = api.get_default_key();
++            auto sk = api.open_secret_key(key);
++            auto pk = api.get_pk(key);
++
++            seal::Plaintext pt("10");
++            seal::Ciphertext ct;
++            seal::Encryptor encryptor(api.context(), pk);
++            seal::Evaluator evaluator(api.context());
++            encryptor.encrypt(pt, ct);
++            evaluator.square_inplace(ct);
++            seal::RelinKeys rlk;
++            start<T>(MUL);
++            api.buffer_triples(key);
++            stop<T>();
++            start<T>(RELIN);
++            api.create_relin_keys(rlk, key);
++            stop<T>();
++
++            seal::Decryptor decryptor(api.context(), sk);
++            decryptor.decrypt(ct, pt);
++            // cout << "re-linearized expected: 100" << endl;
++            // cout << "re-linearized received: " << pt.to_string() << endl;
++        }
++
++        template<class T>
++        void bench_relin_paper(mpheAPI<T>& api){
++            set_net(api);
++            auto& key = api.get_default_key();
++            auto sk = api.open_secret_key(key);
++            auto pk = api.get_pk(key);
++
++            seal::Plaintext pt("10");
++            seal::Ciphertext ct;
++            seal::Encryptor encryptor(api.context(), pk);
++            seal::Evaluator evaluator(api.context());
++            encryptor.encrypt(pt, ct);
++            evaluator.square_inplace(ct);
++            seal::RelinKeys rlk_paper;
++
++            start<T>(RELIN_PAPER);
++            api.create_relin_keys_paper(rlk_paper, key);
++            stop<T>();
++
++            seal::Decryptor decryptor(api.context(), sk);
++            decryptor.decrypt(ct, pt);
++            // cout << "re-linearized expected: 100" << endl;
++            // cout << "re-linearized received: " << pt.to_string() << endl;
++        }
++
++        template<class T>
++        void bench_preprocessing(mpheAPI<T>& api){
++            set_net(api);
++            auto& key = api.get_default_key();
++            auto& shared_key = key.sharedSecretKey();
++            size_t len = shared_key.coeff_count_ * shared_key.coeff_modulus_size_;
++            vector<T> poly(len);
++            start<T>(IN);
++            sample_common_polynomial_shared(poly, shared_key);
++            stop<T>();
++        }
++
++        template<class T>
++        void bench_noise_polynomial(mpheAPI<T>& api){
++            set_net(api);
++            seal::MemoryPoolHandle pool = seal::MemoryManager::GetPool(seal::mm_prof_opt::mm_force_new, true);
++            auto& key = api.get_default_key();
++            auto& shared_key = key.sharedSecretKey();
++            size_t coeff_modulus_size = shared_key.coeff_modulus_size_;
++            size_t coeff_count = shared_key.coeff_count_;
++            vector<T> noise(coeff_count * coeff_modulus_size);
++            
++            start<T>(RELIN);
++            get_distributed_noise(noise, coeff_count, coeff_modulus_size, *api.context().key_context_data(), shared_key);
++            stop<T>();
++        }
++
++        template<class T>
++        void bench_galois(mpheAPI<T>& api){
++            set_net(api);
++            auto& key = api.get_default_key();
++            auto sk = api.open_secret_key(key);
++            auto pk = api.get_pk(key);
++
++            seal::Ciphertext ct, ct_new;
++            seal::Encryptor encryptor(api.context(), pk);
++            seal::Evaluator evaluator(api.context());
++            seal::BatchEncoder encoder(api.context());
++            seal::GaloisKeys galoisKeys;
++            std::vector<int> gks = {0,1,2,4,8,16,32,64,128,256,512,1024,2048};
++            start<T>(GALOIS);
++            api.create_galois_keys(galoisKeys, key, gks);
++            stop<T>();
++
++            create_matrix(encryptor, encoder, ct, true);
++            evaluator.rotate_rows_inplace(ct, 1, galoisKeys);
++            seal::Decryptor decryptor(api.context(), sk);
++            cout << "galois test expected: 3 steps" << endl;
++            decode_matrix(decryptor, encoder, ct, true);
++        }
++
++    private:
++        size_t my_num = 0xDEADBEEF;
++        Timer timer;
++        share_type current_share = VOID_SHARE;
++        function_type current_function = VOID_FUNCTION;
++        map<share_type, map<function_type, vector<double>>> times_map;
++        map<share_type, map<function_type, vector<size_t>>> network_map;
++        Player* P = nullptr;
++    };
++
++class NetworkParams {
++    public:
++        Player* P_;
++        ez::ezOptionParser opt_;
++        seal::SEALContext* context_;
++
++        NetworkParams(int argc, const char ** argv){
++            Names N(opt_, argc, argv, 3);
++            P_ = new CryptoPlayer(N);
++            //seal::scheme_type scheme = (opt_.get("-C")->isSet) ? seal::scheme_type::ckks : seal::scheme_type::bfv;
++            seal::scheme_type scheme = seal::scheme_type::bfv;
++            seal::SEALContext context = get_context(*P_, scheme);
++            context_ = new seal::SEALContext(context);
++        
++        }
++
++        template<class T>
++        T create_api(){
++            return T::create_api(*context_, P_, false);
++        }
++
++        ~NetworkParams(){
++            delete P_;
++            delete context_;
++        }
++
++        void set_context(seal::SEALContext context){
++            delete context_;
++            context_ = new seal::SEALContext(context);
++            return;
++        }
++
++};
++
++
++    template<class T>
++    void bench_api(benchmark& bench, NetworkParams& params){
++        std::cout << "bench api" << std::endl;
++        // params.set_context(get_context(*params.P_, seal::scheme_type::bfv));
++        bench.start<typename T::ShareType>(SETUP);
++        T api = params.create_api<T>();
++        std::cout << "api created" << std::endl;
++        print_parameters(api.context());
++        bench.stop<typename T::ShareType>();
++        bench.set_my_num(api.P().my_num());
++        bench.bench_sk_gen(api);
++        bench.bench_pk_gen(api);
++        bench.bench_bootstrap(api);
++        bench.bench_switch_sk(api);
++        bench.bench_switch_pk(api);
++        bench.bench_decrypt(api);
++        bench.bench_relin(api);
++        bench.bench_galois(api);
++        
++    }
++
++    template<class T>
++    void relin_key_comparison(benchmark& bench, NetworkParams& params){
++        //params.set_context(get_context(*params.P_, seal::scheme_type::bfv));
++        T api = params.create_api<T>();
++        bench.set_my_num(api.P().my_num());
++        
++        bench.bench_relin(api);
++        bench.bench_relin_paper(api);
++        
++    }
++
++
++    template<class T>
++    void bench_noise(NetworkParams& params){
++        //params.set_context(get_context(*params.P_, seal::scheme_type::bfv));
++        T api = params.create_api<T>();
++        map<string, int> noise_map;
++
++        /// Create KeyGenerator and other necessary seal and MHE instances
++        seal::KeyGenerator keyGenerator(api.context());
++        auto& key = api.get_default_key();
++        const seal::SecretKey& sk_seal = keyGenerator.secret_key();
++        seal::GaloisKeys gk_seal, gk_mhe;
++        seal::RelinKeys rlk_seal, rlk_mhe, rlk_paper;
++        seal::PublicKey pk_seal, pk_mhe;
++        seal::Evaluator evaluator(api.context());
++        seal::BatchEncoder encoder(api.context());
++        seal::Ciphertext mat_seal, mat_mhe, num_seal, num_mhe, num_paper;
++        seal::Plaintext num("10");
++
++        /// Initialize instances with proper algorithms
++        vector<int> rotations = {3};
++        keyGenerator.create_galois_keys(rotations, gk_seal);
++        keyGenerator.create_relin_keys(rlk_seal);
++        keyGenerator.create_public_key(pk_seal);
++        seal::Encryptor encryptor_seal(api.context(), pk_seal);
++        seal::Decryptor decryptor_seal(api.context(), sk_seal);
++
++        api.create_relin_keys(rlk_mhe, key);
++        api.create_relin_keys_paper(rlk_paper, key);
++        api.create_galois_keys(gk_mhe, key);
++        pk_mhe = api.get_pk(key);
++        auto sk_mhe = api.open_secret_key(key);
++        seal::Encryptor encryptor_mhe(api.context(), pk_mhe);
++        seal::Decryptor decryptor_mhe(api.context(), sk_mhe);
++
++        /// Create matrices and compare noise after rotations
++
++        create_matrix(encryptor_seal, encoder, mat_seal, true);
++        create_matrix(encryptor_mhe, encoder, mat_mhe, true);
++
++        noise_map["mat seal           "] = decryptor_seal.invariant_noise_budget(mat_seal);
++        noise_map["mat mhe            "] = decryptor_mhe.invariant_noise_budget(mat_mhe);
++
++        evaluator.rotate_rows_inplace(mat_seal, 3, gk_seal);
++        evaluator.rotate_rows_inplace(mat_mhe, 3, gk_mhe);
++
++        noise_map["one rot seal       "] = decryptor_seal.invariant_noise_budget(mat_seal);
++        noise_map["one rot mhe        "] = decryptor_mhe.invariant_noise_budget(mat_mhe);
++
++        for (size_t i = 0; i < 2; ++i) {
++            evaluator.rotate_rows_inplace(mat_seal, 3, gk_seal);
++            evaluator.rotate_rows_inplace(mat_mhe, 3, gk_mhe);
++        }
++//
++        noise_map["3 rot seal        "] = decryptor_seal.invariant_noise_budget(mat_seal);
++        noise_map["3 rot mhe         "] = decryptor_mhe.invariant_noise_budget(mat_mhe);
++
++        decode_matrix(decryptor_seal, encoder, mat_seal, true);
++        decode_matrix(decryptor_mhe, encoder, mat_mhe, true);
++
++        /// Create Ciphertext and check noise on relin, and mpc key switching
++
++        encryptor_seal.encrypt(num, num_seal);
++        encryptor_mhe.encrypt(num, num_mhe);
++        encryptor_mhe.encrypt(num, num_paper);
++
++        noise_map["num seal           "] = decryptor_seal.invariant_noise_budget(num_seal);
++        noise_map["num mhe            "] = decryptor_mhe.invariant_noise_budget(num_mhe);
++
++        evaluator.square_inplace(num_seal);
++        evaluator.square_inplace(num_mhe);
++        evaluator.square_inplace(num_paper);
++        evaluator.relinearize_inplace(num_seal, rlk_seal);
++        evaluator.relinearize_inplace(num_mhe, rlk_mhe);
++        evaluator.relinearize_inplace(num_paper, rlk_paper);
++
++        noise_map["square relin seal  "] = decryptor_seal.invariant_noise_budget(num_seal);
++        noise_map["square relin mhe   "] = decryptor_mhe.invariant_noise_budget(num_mhe);
++        noise_map["square relin paper "] = decryptor_mhe.invariant_noise_budget(num_paper);
++
++        evaluator.square_inplace(num_seal);
++        evaluator.square_inplace(num_mhe);
++        evaluator.relinearize_inplace(num_seal, rlk_seal);
++        evaluator.relinearize_inplace(num_mhe, rlk_mhe);
++
++        noise_map["2 square relin seal"] = decryptor_seal.invariant_noise_budget(num_seal);
++        noise_map["2 square relin  mhe"] = decryptor_mhe.invariant_noise_budget(num_mhe);
++
++        encryptor_mhe.encrypt(num, num_mhe);
++        seal::Ciphertext num_sk_switch, num_pk_switch;
++
++        auto& key_2 = api.create_new_key();
++        api.switch_secret_key(num_mhe, num_sk_switch, key, key_2);
++        api.switch_public_key(num_mhe, num_pk_switch, key, key_2.get_pk_shared());
++
++        noise_map["num                "] = decryptor_mhe.invariant_noise_budget(num_mhe);
++        noise_map["num sk switch      "] = decryptor_mhe.invariant_noise_budget(num_sk_switch);
++        noise_map["num pk switch      "] = decryptor_mhe.invariant_noise_budget(num_pk_switch);
++        api.collective_bootstrap(num_sk_switch, num_mhe, key);
++
++        noise_map["bootstrapped       "] = decryptor_mhe.invariant_noise_budget(num_mhe);
++
++        if(params.P_->my_num() != 0){
++            return;
++        }
++        string filename = string("noise_bench");
++        filename.append(to_string(params.P_->num_players()));
++        filename.append(".txt");
++        ofstream MyFile(filename);
++        cout << endl << "NOISE BENCHMARKS" << endl;
++        for(auto& [name, value] : noise_map){
++            MyFile << name << "\t," << to_string(value) << endl;
++            cout << name <<  "\t," << to_string(value) << endl;
++        }
++        MyFile.close();
++        cout << "---------------------------------------------------------" << endl << endl << endl;
++    }
++
++    template<class T>
++    void bench_all_bfv(benchmark& bench, NetworkParams& params){
++        bench_api<T>(bench, params);
++        relin_key_comparison<T>(bench, params);
++    }
++
++    template<class T>
++    void bench_all_ckks(benchmark& bench, NetworkParams& params){
++        // CKKS is not set here!
++        bench_api<T>(bench, params);
++        relin_key_comparison<T>(bench, params);
++    }
++
++    void execute_all_protocols_bfv(int argc, const char** argv){
++        std::cout << "execute_all_protocols_bfv" << std::endl;
++        benchmark benchmark;
++        NetworkParams params(argc, argv);
++        //bench_noise<semiAPI>(params);
++        
++        for (size_t i = 0; i < NUM_RUNS_BENCHMARK; ++i) {
++
++	        // benchmark.set_current_share(SEMI);
++            // bench_all_bfv<semiAPI>(benchmark, params);
++            
++            benchmark.set_current_share(MASCOT);
++            bench_all_bfv<mascotAPI>(benchmark, params);
++            
++            // if(params.P_->num_players() > 2){
++            //     benchmark.set_current_share(SHAMIR);
++            //     bench_all_bfv<shamirAPI>(benchmark, params);
++
++            //     benchmark.set_current_share(MAL_SHAMIR);
++            //     bench_all_bfv<malShamirAPI>(benchmark, params);
++            // }
++        }
++    }
++
++    void execute_all_protocols_ckks(int argc, const char** argv){
++        benchmark benchmark;
++        NetworkParams params(argc, argv);
++
++        for (size_t i = 0; i < NUM_RUNS_BENCHMARK; ++i) {
++            
++            benchmark.set_current_share(SEMI);
++            bench_all_ckks<semiAPI>(benchmark, params);
++            
++            benchmark.set_current_share(MASCOT);
++            bench_all_ckks<mascotAPI>(benchmark, params);
++
++            if(params.P_->num_players() > 2){
++                benchmark.set_current_share(SHAMIR);
++                bench_all_ckks<shamirAPI>(benchmark, params);
++
++                benchmark.set_current_share(MAL_SHAMIR);
++                bench_all_ckks<malShamirAPI>(benchmark, params);
++            }
++        }
++    }
++
++
++}
++#endif //CODE_BENCHMARK_H
+diff --git a/MPHE/mphe.h b/MPHE/mphe.h
+new file mode 100644
+index 00000000..8e9726b5
+--- /dev/null
++++ b/MPHE/mphe.h
+@@ -0,0 +1,9 @@
++#ifndef MPHE
++#define MPHE
++
++#include "MPHEKeygen.h"
++#include "rlweHelper.h"
++#include "SharedSecretKey.h"
++#include "util.h"
++
++#endif
+diff --git a/MPHE/mpheAPI.cpp b/MPHE/mpheAPI.cpp
+new file mode 100644
+index 00000000..e3f38a74
+--- /dev/null
++++ b/MPHE/mpheAPI.cpp
+@@ -0,0 +1,203 @@
++#define LIB_MPHE
++#include "mpheAPI.h"
++#include "Math/gfp.hpp"
++#include "Machines/maximal.hpp"
++
++
++template<class T>
++mpheAPI<T> mpheAPI<T>::create_api(seal::SEALContext context, Player* P, bool own_vars, uint64_t small_mod){
++    std::cout << "create api" << std::endl;
++    auto* setup = (small_mod == 0) ? new ProtocolSetup<T>(*P, MPHE_PARAMS::MPC_PRIME_LENGTH):
++                                     new ProtocolSetup<T>(bigint(small_mod), *P);
++    std::cout << "set batch size" << std::endl;
++    OnlineOptions::singleton.batch_size = context.key_context_data()->parms().poly_modulus_degree();
++    std::cout << "create api Protocol Set" << std::endl;
++    auto* set = new ProtocolSet<T>(*P, *setup);
++    return {context, setup, set, P, own_vars};
++}
++
++
++template<class T> void mpheAPI<T>::create_galois_keys(seal::GaloisKeys& galois_keys, MPHEKeygen<T>& keygen){
++    keygen.create_shared_galois_keys(galois_keys, keygen.context_.key_context_data()->galois_tool()->get_elts_all());
++}
++
++template<class T> void mpheAPI<T>::create_galois_keys(seal::GaloisKeys &galois_keys, MPHEKeygen<T> &keygen, const std::vector<int> &steps) {
++      keygen.create_shared_galois_keys(galois_keys, keygen.context_.key_context_data()->galois_tool()->get_elts_from_steps(steps));
++}
++
++
++template<class T> void mpheAPI<T>::create_relin_keys(seal::RelinKeys &relin_keys, MPHEKeygen<T> &keygen) {
++    keygen.create_relin_keys_use_square(relin_keys);
++}
++
++template<class T> void mpheAPI<T>::create_relin_key_component(seal::RelinKeys& relin_keys, MPHEKeygen<T>& keygen, 
++    seal::EncryptionParameters& full_parameters, int agent_id){
++        
++    keygen.create_relin_keys_use_square(relin_keys, &full_parameters, agent_id);
++}
++template<class T> void mpheAPI<T>::create_galois_key_component(seal::GaloisKeys& galois_keys, MPHEKeygen<T>& keygen,
++        const std::vector<int>& steps, seal::EncryptionParameters& full_parameters, int agent_id){
++
++    keygen.create_shared_galois_keys(galois_keys, keygen.context_.key_context_data()->galois_tool()->get_elts_from_steps(steps), &full_parameters, agent_id);
++}
++
++
++template<class T> void mpheAPI<T>::create_relin_galois_keys(seal::RelinKeys& relinKeys, seal::GaloisKeys& galoisKeys, MPHEKeygen<T>& keygen,
++                                        const std::vector<int> &steps){
++    keygen.create_galois_relin_keys(galoisKeys, relinKeys, keygen.context_.key_context_data()->galois_tool()->get_elts_from_steps(steps));
++}
++
++template<class T> void mpheAPI<T>::create_relin_galois_keys(seal::RelinKeys& relinKeys, seal::GaloisKeys& galoisKeys, MPHEKeygen<T>& keygen){
++    keygen.create_galois_relin_keys(galoisKeys, relinKeys, keygen.context_.key_context_data()->galois_tool()->get_elts_all());
++}
++
++template<class T> void mpheAPI<T>::create_relin_keys_paper(seal::RelinKeys& relin_keys, MPHEKeygen<T>& keygen){
++    keygen.create_relin_keys_use_paper(relin_keys);
++}
++
++template<class T> void mpheAPI<T>::decrypt(seal::Ciphertext& ct, seal::Plaintext& plain, MPHEKeygen<T>& keygen, seal::prng_seed_type* seed){
++    keygen.collective_decrypt(ct, plain, seed);
++}
++
++template<class T> void mpheAPI<T>::partial_decrypt(seal::Ciphertext& ct, seal::Plaintext& plain, MPHEKeygen<T>& keygen, seal::prng_seed_type* seed){
++    keygen.create_decryption_phase(ct, plain, seed);
++}
++
++template<class T> void mpheAPI<T>::conclude_decrypt(seal::Ciphertext& ct, seal::Plaintext& plain){
++    conclude_decryption(ct, plain, context_);
++}
++
++template<class T> void mpheAPI<T>::switch_public_key(seal::Ciphertext &ciphertext_old, seal::Ciphertext &ciphertext_target,
++                                   MPHEKeygen<T> &keygen_origin, seal::PublicKey &publicKey_target, seal::prng_seed_type* seed) {
++    keygen_origin.pub_key_switch(ciphertext_old, ciphertext_target, publicKey_target, seed);
++}
++
++template<class T> void mpheAPI<T>::switch_secret_key(seal::Ciphertext& ciphertext_old, seal::Ciphertext& ciphertext_target,
++                        MPHEKeygen<T>& keygen, MPHEKeygen<T>& keygen_target, seal::prng_seed_type* seed){
++    keygen.key_switch(ciphertext_old, ciphertext_target, keygen_target, seed);
++}
++
++template<class T>
++void mpheAPI<T>::partial_bootstrap(seal::Ciphertext& ct_old, seal::Ciphertext& ct_new, uint64_t* h0,
++                              MPHEKeygen<T>& keygen, seal::prng_seed_type* seed){
++    keygen.bootstrap_mpc_part(ct_old, ct_new, h0, 1.0, seed);
++}
++template<class T> void mpheAPI<T>::collective_bootstrap(seal::Ciphertext& ct_old, seal::Ciphertext& ct_new,
++                                                        MPHEKeygen<T>& keygen, seal::prng_seed_type* seed){
++    keygen.collective_bootstrap(ct_old, ct_new, 1.0, seed);
++}
++
++template<class T> void mpheAPI<T>::exchange_ciphertext(seal::Ciphertext& ct, int sending_party){
++    if(sending_party >= P_->num_players()){
++        std::cout << "Error exchanging ciphertexts" << std::endl;
++        exit(-1);
++    }
++    (P_->my_num() == sending_party) ? 
++        send_ciphertext(*P_, sending_party, ct) : 
++        recv_ciphertext(*P_, sending_party, ct);
++}
++
++template<class T> seal::SecretKey mpheAPI<T>::open_secret_key(MPHEKeygen<T>& keygen){
++    return keygen.open_secret_key();
++}
++
++template<class T> seal::PublicKey mpheAPI<T>::get_pk(MPHEKeygen<T>& keygen){
++    return keygen.pk_shared_;
++}
++
++template<class T> MPHEKeygen<T>& mpheAPI<T>::get_default_key(){
++    if(first == nullptr){
++        if(keygen_to_free.empty()){
++            first = &create_new_key();
++        } else {
++            first = keygen_to_free.at(0);
++        }
++    }
++    return *first;
++}
++
++template<class T> void mpheAPI<T>::set_default_key(MPHEKeygen<T>* key){
++    first = key;
++}
++
++template<class T> seal::PublicKey& mpheAPI<T>::get_default_pk(){
++    auto& key = get_default_key();
++    return key.get_pk_shared();
++}
++
++template<class T> Player& mpheAPI<T>::P(){
++    return *P_;
++}
++
++template<class T>
++MPHEKeygen<T>& mpheAPI<T>::keygen_from_file(const string& param_path, const string& key_path, bool dummy){
++    ifstream sk_stream, param_stream;
++    sk_stream.open(key_path);
++    param_stream.open(param_path);
++    seal::EncryptionParameters parms;
++    parms.load(param_stream);
++    seal::SEALContext context(parms);
++    seal::SecretKey sk;
++    sk.load(context, sk_stream);
++    sk_stream.close();
++    param_stream.close();
++    MPHEKeygen<T>* keygen = new MPHEKeygen<T>(context_, *P_, *set_, sk, dummy);
++    mpheAPI<T>::keygen_to_free.emplace_back(keygen);
++    keygen_has_triples[keygen] = false;
++    return *keygen;
++}
++
++template<class T>
++MPHEKeygen<T>& mpheAPI<T>::create_new_key() {
++    MPHEKeygen<T>* keygen = new MPHEKeygen<T>(context_, *P_, *set_);
++    mpheAPI<T>::keygen_to_free.emplace_back(keygen);
++    keygen_has_triples[keygen] = false;
++    return *keygen;
++}
++
++template<class T>
++seal::PublicKey mpheAPI<T>::create_new_pk(MPHEKeygen<T>& keygen){
++  return keygen.generate_pk_share(keygen.sharedSecretKey());
++}
++
++template<class T>
++void mpheAPI<T>::delete_all_keys() {
++    for(auto keygen : keygen_to_free){
++        delete keygen;
++    }
++}
++
++template<class T>
++seal::SEALContext& mpheAPI<T>::context(){
++    return context_;
++}
++
++template<class T>
++void mpheAPI<T>::buffer_triples(MPHEKeygen<T>& keygen) {
++    if(keygen_has_triples.at(&keygen)){
++        return;
++    }
++        for (size_t i = 0; i < keygen.sharedSecretKey().coeff_modulus_size_; i++)
++    {
++        set_->preprocessing.buffer_triples();
++    }
++    keygen_has_triples[&keygen] = true;
++}
++
++template<class T>
++mpheAPI<T>::~mpheAPI<T>(){
++    for(auto keygen : keygen_to_free){
++        delete keygen;
++    }
++    delete setup_;
++    delete set_;
++    if(own_vars_){
++        delete P_;
++    }
++}
++
++
++template class mpheAPI<SemiShare<MPHE_PARAMS::field>>;
++template class mpheAPI<Share<MPHE_PARAMS::field>>;
++template class mpheAPI<ShamirShare<MPHE_PARAMS::field>>;
++template class mpheAPI<MaliciousShamirShare<MPHE_PARAMS::field>>;
+diff --git a/MPHE/mpheAPI.h b/MPHE/mpheAPI.h
+new file mode 100644
+index 00000000..abb05174
+--- /dev/null
++++ b/MPHE/mpheAPI.h
+@@ -0,0 +1,123 @@
++#ifndef CODE_MPHEAPI_H
++#define CODE_MPHEAPI_H
++#define NO_MIXED_CIRCUITS
++#define ENABLE_SOFTSPOKEN_OT
++
++#include "mphe.h"
++#include "Machines/maximal.hpp"
++#include "Protocols/ProtocolSet.h"
++
++#include "Math/gfp.h"
++
++
++
++
++template<class T>
++class mpheAPI {
++
++public:
++
++    typedef T ShareType;
++
++    MPHEKeygen<T>* first = nullptr;
++    std::vector<MPHEKeygen<T>*> keygen_to_free;
++    seal::SEALContext context_;
++
++    ProtocolSetup<T>* setup_;
++    ProtocolSet<T>* set_;
++
++    Player* P_;
++    bool own_vars_;
++
++    static mpheAPI create_api(seal::SEALContext context, Player* P, bool own_vars=true, uint64_t small_mod = 0);
++
++    void create_galois_keys(seal::GaloisKeys& galois_keys, MPHEKeygen<T>& keygen);
++
++    void create_galois_keys(seal::GaloisKeys& galois_keys, MPHEKeygen<T>& keygen, const std::vector<int> &steps);
++
++    void create_relin_keys(seal::RelinKeys& relin_keys, MPHEKeygen<T>& keygen);
++
++    void create_relin_key_component(seal::RelinKeys& relin_keys, MPHEKeygen<T>& keygen, 
++                                    seal::EncryptionParameters& full_parameters, int agent_id);
++
++    void create_galois_key_component(seal::GaloisKeys& galois_keys, MPHEKeygen<T>& keygen,
++        const std::vector<int>& steps, seal::EncryptionParameters& full_parameters, int agent_id);                                    
++
++    void create_relin_galois_keys(seal::RelinKeys& relinKeys, seal::GaloisKeys& galoisKeys, MPHEKeygen<T>& keygen,
++                                          const std::vector<int> &steps);
++
++    void create_relin_galois_keys(seal::RelinKeys& relinKeys, seal::GaloisKeys& galoisKeys, MPHEKeygen<T>& keygen);
++
++    void create_relin_keys_paper(seal::RelinKeys& relin_keys, MPHEKeygen<T>& keygen);
++
++    void decrypt(seal::Ciphertext& ct, seal::Plaintext& plain, MPHEKeygen<T>& keygen, 
++                seal::prng_seed_type* seed = nullptr);
++
++    void partial_decrypt(seal::Ciphertext& ct, seal::Plaintext& plain, MPHEKeygen<T>& keygen, seal::prng_seed_type* seed);
++
++    void conclude_decrypt(seal::Ciphertext& ct, seal::Plaintext& plain);
++
++    void switch_public_key(seal::Ciphertext &ciphertext_old, seal::Ciphertext &ciphertext_target,
++                                   MPHEKeygen<T> &keygen_origin, seal::PublicKey &publicKey_target,
++                                   seal::prng_seed_type* seed = nullptr);
++
++    void switch_secret_key(seal::Ciphertext& ciphertext_old, seal::Ciphertext& ciphertext_target,
++                           MPHEKeygen<T>& keygen, MPHEKeygen<T>& keygen_target, seal::prng_seed_type* seed = nullptr);
++
++    void collective_bootstrap(seal::Ciphertext& ct_old, seal::Ciphertext& ct_new, 
++                              MPHEKeygen<T>& keygen, seal::prng_seed_type* seed = nullptr);
++
++    void partial_bootstrap(seal::Ciphertext& ct_old, seal::Ciphertext& ct_new, uint64_t* h0,
++                              MPHEKeygen<T>& keygen, seal::prng_seed_type* seed);
++
++    void exchange_ciphertext(seal::Ciphertext& ct, int sending_party);
++
++    seal::SecretKey open_secret_key(MPHEKeygen<T>& keygen);
++
++    seal::PublicKey get_pk(MPHEKeygen<T>& keygen);
++
++    MPHEKeygen<T>& get_default_key();
++
++    void set_default_key(MPHEKeygen<T>* key);
++
++    mpheAPI(const mpheAPI& other) = delete;
++
++    mpheAPI(const mpheAPI&& other) = delete;
++
++    ~mpheAPI();
++
++    MPHEKeygen<T> &keygen_from_file(const string &param_path, const string &key_path, bool dummy);
++
++    MPHEKeygen<T>& create_new_key();
++
++    seal::PublicKey create_new_pk(MPHEKeygen<T>& keygen);
++
++    seal::PublicKey& get_default_pk();
++
++    seal::SEALContext& context();
++
++    Player& P();
++
++    void buffer_triples(MPHEKeygen<T>& keygen);
++
++    void delete_all_keys();
++
++    size_t data_sent();
++
++    private:
++
++    mpheAPI(seal::SEALContext context, ProtocolSetup<T>* setup, ProtocolSet<T>* set, Player* P, bool own_vars) :
++    context_(std::move(context)), setup_(setup), set_(set), P_(P), own_vars_(own_vars)
++    {}
++
++    map<MPHEKeygen<T>*, bool> keygen_has_triples;
++
++};
++
++
++typedef mpheAPI<SemiShare<MPHE_PARAMS::field>> semiAPI;
++typedef mpheAPI<Share<MPHE_PARAMS::field>> mascotAPI;
++typedef mpheAPI<ShamirShare<MPHE_PARAMS::field>> shamirAPI;
++typedef mpheAPI<MaliciousShamirShare<MPHE_PARAMS::field>> malShamirAPI;
++
++#endif //CODE_MPHEAPI_H
+\ No newline at end of file
+diff --git a/MPHE/params.h b/MPHE/params.h
+new file mode 100644
+index 00000000..69afc56f
+--- /dev/null
++++ b/MPHE/params.h
+@@ -0,0 +1,29 @@
++#ifndef CODE_PARAMS_H
++#define CODE_PARAMS_H
++#include "mphe.h"
++
++namespace MPHE_PARAMS{
++
++   constexpr uint64_t MOD_DEGREE = 8192;
++    // constexpr uint64_t MOD_DEGREE = 16384;
++
++    constexpr uint64_t PLAIN_BIT_LENGTH = 20;
++    // constexpr uint64_t PLAIN_BIT_LENGTH = 42;
++
++    constexpr uint64_t PREPROCESSING = MOD_DEGREE / 8;
++
++    constexpr uint64_t MPC_PRIME_LENGTH = 128;
++
++    constexpr uint64_t LIMBS = (MPC_PRIME_LENGTH + 63) / 64;
++
++    typedef gfp_<10, LIMBS> field;
++
++    const std::map<seal::scheme_type, vector<int>> scheme_param_map = {
++            //{seal::scheme_type::ckks, { 60, 40, 40, 60 }},
++            {seal::scheme_type::ckks, { 60, 40, 40, 60 }},
++            {seal::scheme_type::bfv, {50, 30, 30, 50, 50}}
++            // {seal::scheme_type::bfv,     {48, 48, 48, 49, 49, 49, 49, 49, 49}}
++    };
++}
++
++#endif //CODE_PARAMS_H
+diff --git a/MPHE/rlweHelper.h b/MPHE/rlweHelper.h
+new file mode 100644
+index 00000000..02b7db12
+--- /dev/null
++++ b/MPHE/rlweHelper.h
+@@ -0,0 +1,758 @@
++#pragma once
++#ifndef CODE_RLWE_H
++#define CODE_RLWE_H
++
++#include "seal/seal.h"
++#include "seal/util/rlwe.h"
++#include "seal/util/polyarithsmallmod.h"
++#include "seal/util/clipnormal.h"
++#include "Protocols/ProtocolSet.h"
++#include "SharedSecretKey.h"
++
++void increment_seed(seal::prng_seed_type& seed);
++
++using namespace seal::util;
++
++///############################################################
++///  Generation of smudged error polynomials
++///  Taken from https://github.com/rw0x0/CoronaHeatMap
++///############################################################
++
++inline uint64_t generate_random_uint64_t(
++        std::shared_ptr<seal::UniformRandomGenerator> &prng) {
++    uint64_t low, high;
++    low = prng->generate();
++    high = prng->generate();
++    return low + (high << 32);
++}
++
++inline bool generate_random_bool(std::shared_ptr<seal::UniformRandomGenerator> &prng) {
++    seal::seal_byte byte;
++    prng->generate(1, &byte);
++    return (std::to_integer<int>(byte) & 1) == 1;
++}
++
++template<class T>
++class RandBigInt {
++private:
++    std::vector<uint64_t> limbs_;
++    bool is_neg_;
++
++public:
++    RandBigInt(size_t bits, std::shared_ptr<seal::UniformRandomGenerator> &prng);
++    ~RandBigInt() = default;
++    RandBigInt(const RandBigInt &) = delete;
++    RandBigInt &operator=(const RandBigInt &) = delete;
++
++    uint64_t mod_limb(uint64_t mod) const;
++    bool is_neg() const { return this->is_neg_; }
++};
++
++template<class T>
++RandBigInt<T>::RandBigInt(size_t num_bits,
++                       std::shared_ptr<seal::UniformRandomGenerator> &prng) {
++    num_bits--;  // is_neg is sampled separately
++    size_t num_limbs = ceil((double)num_bits / 64);
++    limbs_.reserve(num_limbs);
++
++    while (num_bits > 0) {
++        if (num_bits < 64) {
++            uint64_t mask = (1ULL << num_bits) - 1;
++            uint64_t rand = generate_random_uint64_t(prng) & mask;
++            limbs_.push_back(rand);
++            num_bits = 0;
++        } else {
++            limbs_.push_back(generate_random_uint64_t(prng));
++            num_bits -= 64;
++        }
++    }
++    is_neg_ = generate_random_bool(prng);
++}
++
++template<class T>
++uint64_t RandBigInt<T>::mod_limb(uint64_t mod) const {
++    size_t num_limbs = limbs_.size();
++    if (num_limbs == 0) return 0;
++
++    __uint128_t result = limbs_[0] % mod;
++    if (num_limbs == 1) return (uint64_t)result;
++
++    __uint128_t two_64 = 1ULL;
++    two_64 <<= 64;
++    uint64_t two_64_red = two_64 % mod;
++
++    uint64_t powers = two_64_red;
++
++    for (size_t i = 1; i < num_limbs; i++) {
++        uint64_t tmp = ((__uint128_t)powers * limbs_[i]) % mod;
++        result = (result + tmp) % mod;
++        if (i != num_limbs - 1) {
++            powers = ((__uint128_t)powers * two_64_red) % mod;
++        }
++    }
++
++    return (uint64_t)result;
++}
++
++template<class T>
++inline void sample_poly_large_uniform(
++        std::shared_ptr<seal::UniformRandomGenerator> prng,
++        const seal::EncryptionParameters &parms, uint64_t *destination,
++        uint64_t noise_bits) {
++    auto coeff_modulus = parms.coeff_modulus();
++    size_t coeff_modulus_size = coeff_modulus.size();
++    size_t coeff_count = parms.poly_modulus_degree();
++
++    SEAL_ITERATE(seal::util::iter(destination), coeff_count, [&](auto &I) {
++        RandBigInt<T> noise(noise_bits, prng);
++        auto flag =
++                static_cast<uint64_t>(-static_cast<int64_t>(noise.is_neg()));
++        SEAL_ITERATE(
++                seal::util::iter(seal::util::StrideIter<uint64_t *>(&I, coeff_count),
++                                 coeff_modulus),
++                coeff_modulus_size, [&](auto J) {
++                    auto rem =
++                            static_cast<int64_t>(noise.mod_limb(std::get<1>(J).value()));
++                    if (noise.is_neg()) rem *= -1;
++                    *std::get<0>(J) =
++                            static_cast<uint64_t>(rem) + (flag & std::get<1>(J).value());
++                });
++    });
++}
++
++///############################################################
++/// End of section
++///############################################################
++inline void
++sample_poly_normal_smudged(std::shared_ptr<seal::UniformRandomGenerator> prng, const seal::EncryptionParameters &parms,
++                           uint64_t *destination, double smudge_factor){
++    auto coeff_modulus = parms.coeff_modulus();
++    size_t coeff_modulus_size = coeff_modulus.size();
++    size_t coeff_count = parms.poly_modulus_degree();
++
++    if (are_close(global_variables::noise_max_deviation, 0.0))
++    {
++        set_zero_poly(coeff_count, coeff_modulus_size, destination);
++        return;
++    }
++
++    seal::RandomToStandardAdapter engine(prng);
++    seal::util::ClippedNormalDistribution dist(
++            0, global_variables::noise_standard_deviation * smudge_factor, global_variables::noise_max_deviation);
++
++    SEAL_ITERATE(iter(destination), coeff_count, [&](auto &I) {
++        auto noise = static_cast<int64_t>(dist(engine));
++        auto flag = static_cast<uint64_t>(-static_cast<int64_t>(noise < 0));
++        SEAL_ITERATE(
++                iter(StrideIter<uint64_t *>(&I, coeff_count), coeff_modulus), coeff_modulus_size,
++                [&](auto J) { *get<0>(J) = static_cast<uint64_t>(noise) + (flag & get<1>(J).value()); });
++    });
++}
++
++
++template<class T>
++void multiply_poly_shared_scalar(const vector<T>& op1, uint64_t factor, size_t len, vector<T>& result, size_t offset=0){
++    const typename T::clear factor_clear(factor);
++    for (size_t i = offset; i < offset + len; ++i) {
++        const T share = op1.at(i);
++        result.at(i - offset) = share * factor_clear;
++    }
++}
++
++template<class T>
++void dyadic_product_coeffmod_(SharedSecretKey<T>& secret_key, const vector<T>& op1, const vector<T>& op2, size_t len, vector<T>& result){
++    auto& protocol = secret_key.protocol();
++    protocol.init_mul();
++    for (size_t i = 0; i < len; ++i) {
++            protocol.prepare_mul(op1.at(i), op2.at(i));
++    }
++    protocol.exchange();
++    for (size_t i = 0; i < len; ++i) {
++        result.at(i) = protocol.finalize_mul();
++    }
++}
++
++template<class T>
++void multiply_to_small_shared(SharedSecretKey<T>& secret_key, const vector<T>& small, vector<T>& big, size_t offset=0){
++    auto& protocol = secret_key.protocol();
++    protocol.init_mul();
++    for (size_t i = offset; i < small.size() + offset; ++i) {
++        protocol.prepare_mul(small.at(i - offset), big.at(i));
++    }
++    protocol.exchange();
++    for (size_t i = offset; i < small.size() + offset; ++i) {
++        big.at(i) = protocol.finalize_mul();
++    }
++}
++
++template<class T>
++void dyadic_product_coeffmod_(const vector<T> &shared_operand, const uint64_t *operand2, size_t len, vector<T> &result) {
++    for (size_t i =0; i < len; ++i) {
++        const T share = shared_operand.at(i);
++        const typename T::clear constant(*(operand2 + i));
++        result.at(i) = share * constant;
++    }
++}
++
++template<class T>
++void multiply_to_small(SharedSecretKey<T>& key, const vector<T>& shared_small, const uint64_t* op2, size_t len, vector<T>& result_big, size_t offset){
++    size_t max = shared_small.size() + offset - 1;
++    for (size_t i = 0; i < len; ++i) {
++        if(i < offset || max < i){
++            const T constant = key.constant(*(op2 + i));
++            result_big.at(i) = constant;
++        } else {
++            const T share = shared_small.at(i - offset);
++            const typename T::clear constant(*(op2 + i));
++            result_big.at(i) = share * constant;
++        }
++    }
++}
++
++template<class T>
++void constant_poly(SharedSecretKey<T>& key, vector<T>& destination, uint64_t constant){
++    for (auto& coeff : destination) {
++        coeff = key.constant(constant);
++    }
++}
++
++template<class T>
++void create_constant_shared(SharedSecretKey<T>& key, const uint64_t* input, vector<T>& result){
++    for (size_t i = 0; i < result.size(); ++i) {
++        result.at(i) = key.constant(*(input + i));
++    }
++}
++
++template<class T>
++void add_poly_coeffmod_(SharedSecretKey<T>& key, const vector<T>& op1, const uint64_t* op2, size_t len, vector<T>& result){
++
++    for (size_t i = 0; i < len; ++i) {
++        const T share1 = op1.at(i);
++        const T share2 = key.constant(*(op2 + i));
++        result.at(i) = share1 + share2;
++    }
++}
++
++template<class T>
++void add_poly_coeffmod_(const vector<T> &shared_operand1, const vector<T> &operand2, vector<T> &result){
++    for (size_t i = 0; i < shared_operand1.size(); ++i) {
++        const T share1 = shared_operand1.at(i);
++        const T share2 = operand2.at(i);
++        result.at(i) = share1 + share2;
++    }
++}
++
++template<class T>
++void add_small_(const vector<T>& small, const vector<T>& big, size_t offset, vector<T>& result_big){
++    size_t max = small.size() + offset - 1;
++    for (size_t i = 0; i < big.size(); ++i) {
++        if(i < offset || max < i){
++            result_big.at(i) = big.at(i);
++        } else {
++            const T share_small = small.at(i - offset);
++            const T share_big   = big.at(i);
++            result_big.at(i) = share_small + share_big;
++        }
++    }
++}
++
++template<class T>
++void add_small_(const vector<T>& small, vector<T>& big, size_t offset){
++    if(small.size() > big.size()){
++        throw std::logic_error("small vector has more elements than big vector");
++    }
++    for (size_t i = 0; i < small.size(); ++i) {
++        big.at(offset + i) = big.at(offset + i) + small.at(i);
++    }
++}
++
++template<class T>
++void sub_poly_coeffmod_(const vector<T>& op1, const vector<T>& op2, vector<T>& result, size_t len){
++    for (size_t i = 0; i < len ; ++i) {
++        result.at(i) = op1.at(i) - op2.at(i);
++    }
++}
++
++template<class T>
++void sub_small_(const vector<T>& small, vector<T>& big, size_t offset){
++    if(small.size() > big.size()){
++        throw std::logic_error("small vector has more elements than big vector");
++    }
++    for (size_t i = 0; i < small.size(); ++i) {
++        big.at(offset + i) = big.at(offset + i) - small.at(i);
++    }
++}
++
++template<class T>
++void distribute_noise(const uint64_t* noise, size_t length, SharedSecretKey<T>& secretKey, vector<T> &result_noise){
++    auto& input = secretKey.input();
++    input.reset_all(secretKey.P());
++    for (size_t i = 0; i < length; ++i) {
++        typename T::clear n(*(noise + i));
++        input.add_from_all(n);
++    }
++    input.exchange();
++    for (size_t i = 0; i < length; ++i) {
++        vector<T> current_coeff(secretKey.P().num_players());
++        for (int j = 0; j < secretKey.P().num_players(); ++j) {
++            current_coeff.at(j) = input.finalize(j);
++        }
++        result_noise.at(i) = current_coeff.at(0);
++        for (int j = 1; j < secretKey.P().num_players(); ++j) {
++            result_noise.at(i) += current_coeff.at(j);
++        }
++    }
++}
++
++template<class T>
++void open_RNS_component(SharedSecretKey<T>& secret_key, const vector<T>& poly, const seal::Modulus& modulus, uint64_t* result){
++    auto& output = secret_key.output();
++    auto& set = secret_key.protocol_set();
++    auto& P = secret_key.P();
++    vector<typename T::clear> res(poly.size());
++    output.init_open(P);
++
++    for (auto share : poly) {
++        output.prepare_open(share);
++    }
++    output.exchange(P);
++    for (auto& clear : res) {
++        clear = output.finalize_open();
++    }
++    set.check();
++    uint64_t mod = modulus.value();
++    bigint mod_bigint(mod);
++    for (size_t j = 0; j < secret_key.coeff_count_; ++j) {
++        typename T::clear coeff = res.at(j);
++        bigint a;
++        a.from_signed<0, T::clear::N_LIMBS>(coeff);
++        ostringstream os;
++        a %= mod_bigint;
++        if(a < 0){
++            a += mod_bigint;
++        }
++        os << a;
++        istringstream iss(os.str());
++        uint64_t result_;
++        iss >> result_;
++        *(result + j) = result_;
++    }
++}
++
++template<class T>
++void bigint_to_uintmod(size_t coeff_mod_size, size_t coeff_count, const vector<seal::Modulus>& modulus,
++                       const vector<typename T::clear>& res, uint64_t* result){
++    for (size_t i = 0; i < coeff_mod_size; ++i) {
++        uint64_t mod = modulus.at(i).value();
++        bigint mod_bigint(mod);
++        for (size_t j = 0; j < coeff_count; ++j) {
++            typename T::clear coeff = res.at(j + i * coeff_count);
++            bigint a;
++            a.from_signed<10, T::clear::N_LIMBS>(coeff);
++            ostringstream os;
++            a %= mod_bigint;
++            if(a < 0){
++                a += mod_bigint;
++            }
++            os << a;
++            istringstream iss(os.str());
++            uint64_t result_;
++            iss >> result_;
++            *(result + j + i * coeff_count) = result_;
++        }
++    }
++
++}
++
++template<class T>
++void mod_poly(uint64_t* poly, size_t coeff_cnt, size_t coeff_mod_cnt, const vector<seal::Modulus>& modulus){
++    if(modulus.size() < coeff_mod_cnt){
++        throw logic_error("Coeff mod count in mod operation too large");
++    }
++    for(size_t i=0; i < coeff_mod_cnt; i++){
++        uint64_t mod_value = modulus.at(i).value();
++        for(size_t j = 0; j < coeff_cnt; j++){
++            uint64_t* entry = (poly + coeff_cnt * i + j);
++            *entry %= mod_value;
++        }
++    }
++}
++
++template<class T>
++void open_polynomials(SharedSecretKey<T>& secret_key, const vector<vector<T>*>& polys, const vector<seal::Modulus>& modulus,
++                      size_t coeff_mod_size, vector<uint64_t*>& destinations){
++    if(destinations.size() != polys.size()){
++        cout << destinations.size() << " : " << polys.size() << endl;
++        throw logic_error("Number of targets must be equal number of polynomials");
++    }
++
++    auto& output = secret_key.output();
++    auto& set = secret_key.protocol_set();
++    auto& P = secret_key.P();
++    vector<vector<typename T::clear>> results(polys.size());
++    output.init_open(P);
++
++    for (size_t i = 0; i < polys.size(); ++i) {
++        auto& poly = *(polys.at(i));
++        for (auto& share : poly) {
++            output.prepare_open(share);
++        }
++        results[i] = vector<typename T::clear>(poly.size());
++    }
++
++    output.exchange(P);
++
++    for (auto& res: results) {
++        for (auto& clear : res) {
++            clear = output.finalize_open();
++        }
++    }
++
++    set.check();
++    for (size_t k = 0; k < results.size(); ++k) {
++        auto& res = results.at(k);
++        uint64_t* result = destinations.at(k);
++        bigint_to_uintmod<T>(coeff_mod_size, secret_key.coeff_count_, modulus, res, result);
++    }
++}
++
++
++
++template<class T>
++void open_polynomial(SharedSecretKey<T>& secret_key, const vector<T>& poly, const vector<seal::Modulus>& modulus, size_t coeff_mod_size, uint64_t* result){
++    auto& output = secret_key.output();
++    auto& P = secret_key.P();
++    auto& set = secret_key.protocol_set();
++
++    vector<typename T::clear> res(poly.size());
++    output.init_open(P);
++
++    for (auto share : poly) {
++        output.prepare_open(share);
++    }
++    output.exchange(P);
++    for (auto& clear : res) {
++        clear = output.finalize_open();
++    }
++    set.check();
++
++    bigint_to_uintmod<T>(coeff_mod_size, secret_key.coeff_count_, modulus, res, result);
++
++}
++
++inline void sample_common_plaintext_polynomial(const seal::Modulus& modulus, uint64_t coeff_count,
++                                               std::shared_ptr<seal::UniformRandomGenerator>& bootstrap_prng, uint64_t *destination){
++
++    seal::prng_seed_type public_prng_seed;
++    bootstrap_prng->generate(seal::prng_seed_byte_count, reinterpret_cast<seal::seal_byte *>(public_prng_seed.data()));
++    auto ciphertext_prng = seal::UniformRandomGeneratorFactory::DefaultFactory()->create(public_prng_seed);
++
++    // Extract encryption parameters
++    size_t dest_byte_count = mul_safe( coeff_count, sizeof(uint64_t));
++
++    constexpr auto max_random = static_cast<uint64_t>(0xFFFFFFFFFFFFFFFFULL);
++
++    // Fill the destination buffer with fresh randomness
++    ciphertext_prng->generate(dest_byte_count, reinterpret_cast<seal::seal_byte *>(destination));
++
++    uint64_t max_multiple = max_random - barrett_reduce_64(max_random, modulus) - 1;
++    transform(destination, destination + coeff_count, destination, [&](uint64_t rand) {
++        // This ensures uniform distribution
++        while (rand >= max_multiple)
++        {
++            ciphertext_prng->generate(sizeof(uint64_t), reinterpret_cast<seal::seal_byte *>(&rand));
++        }
++        return barrett_reduce_64(rand, modulus);
++    });
++}
++
++inline void sample_common_plaintext_polynomial(const seal::EncryptionParameters &parms, uint64_t *destination){
++
++    auto bootstrap_prng = parms.random_generator()->create();
++    size_t coeff_count = parms.poly_modulus_degree();
++    auto& modulus = parms.plain_modulus();
++    sample_common_plaintext_polynomial(modulus, coeff_count, bootstrap_prng, destination);
++}
++inline void sample_common_plaintext_polynomial(const seal::EncryptionParameters &parms, uint64_t num_parties, uint64_t *destination){
++
++    auto bootstrap_prng = parms.random_generator()->create();
++    size_t coeff_count = parms.poly_modulus_degree();
++    seal::Modulus modulus;
++    auto& plain_modulus = parms.plain_modulus();
++    if(num_parties != 0){
++        uint64_t mod_value = plain_modulus.value();
++        mod_value /= num_parties;
++        uint64_t bit_length = ceil(log2(mod_value));
++        cout << "drawing masking M with bitlength: " << bit_length << endl;
++        modulus = seal::PlainModulus::Batching(parms.poly_modulus_degree(), bit_length);
++    } else {
++        modulus = plain_modulus;
++    }
++    
++    sample_common_plaintext_polynomial(modulus, coeff_count, bootstrap_prng, destination);
++}
++
++inline void multiply_add_plain_with_scaling_variant(
++        const seal::Plaintext &plain, const seal::SEALContext::ContextData &context_data, RNSIter destination){
++    auto &parms = context_data.parms();
++    size_t plain_coeff_count = plain.coeff_count();
++    auto &coeff_modulus = parms.coeff_modulus();
++    size_t coeff_modulus_size = coeff_modulus.size();
++    auto plain_modulus = context_data.parms().plain_modulus();
++    auto coeff_div_plain_modulus = context_data.coeff_div_plain_modulus();
++    uint64_t plain_upper_half_threshold = context_data.plain_upper_half_threshold();
++    uint64_t q_mod_t = context_data.coeff_modulus_mod_plain_modulus();
++
++    // Coefficients of plain m multiplied by coeff_modulus q, divided by plain_modulus t,
++    // and rounded to the nearest integer (rounded up in case of a tie). Equivalent to
++    // floor((q * m + floor((t+1) / 2)) / t).
++    SEAL_ITERATE(iter(plain.data(), size_t(0)), plain_coeff_count, [&](auto I) {
++        // Compute numerator = (q mod t) * m[i] + (t+1)/2
++        unsigned long long prod[2]{ 0, 0 };
++        uint64_t numerator[2]{ 0, 0 };
++        multiply_uint64(get<0>(I), q_mod_t, prod);
++        unsigned char carry = add_uint64(*prod, plain_upper_half_threshold, numerator);
++        numerator[1] = static_cast<uint64_t>(prod[1]) + static_cast<uint64_t>(carry);
++
++        // Compute fix[0] = floor(numerator / t)
++        uint64_t fix[2] = { 0, 0 };
++        divide_uint128_inplace(numerator, plain_modulus.value(), fix);
++
++        // Add to ciphertext: floor(q / t) * m + increment
++        size_t coeff_index = get<1>(I);
++        SEAL_ITERATE(
++                iter(destination, coeff_modulus, coeff_div_plain_modulus), coeff_modulus_size, [&](auto J) {
++                    uint64_t scaled_rounded_coeff = multiply_add_uint_mod(get<0>(I), get<2>(J), fix[0], get<1>(J));
++                    get<0>(J)[coeff_index] = add_uint_mod(get<0>(J)[coeff_index], scaled_rounded_coeff, get<1>(J));
++                });
++    });
++}
++
++inline void sample_scaled_plaintext_polynomial(size_t coeff_count, size_t num_parties, const seal::SEALContext::ContextData &context_data, uint64_t* destination){
++    auto &parms = context_data.parms();
++    //auto* plain = static_cast<uint64_t *>(malloc(coeff_count * sizeof(uint64_t)));
++    seal::Plaintext plain;
++    plain.parms_id() = seal::parms_id_zero;
++    plain.resize(coeff_count);
++    if(num_parties){
++        sample_common_plaintext_polynomial(parms, num_parties, plain.data());
++    } else {
++        sample_common_plaintext_polynomial(parms, plain.data());
++    }
++    
++    multiply_add_plain_with_scaling_variant(plain, context_data, {destination, coeff_count});
++}
++
++inline void decompose_poly(const uint64_t* source, size_t coeff_count, size_t coeff_modulus_size, const seal::util::NTTTables* ntt_tables,
++                           const vector<seal::Modulus>& modulus, uint64_t* destination){
++    for (size_t i = 0; i < coeff_modulus_size; ++i) {
++        size_t offset = i * coeff_count;
++        for (size_t j = 0; j < coeff_count; ++j) {
++            *(destination + offset + j) = *(source + j) % modulus.at(i).value();
++        }
++        seal::util::ntt_negacyclic_harvey(destination + offset, ntt_tables[i]);
++    }
++}
++
++inline void extend_ckks_plaintext(seal::Plaintext& plaintext, seal::SEALContext& context, double scale){
++    Timer timer;
++    timer.start();
++    seal::CKKSEncoder encoder(context);
++    vector<double> raw(encoder.slot_count());
++    encoder.decode(plaintext, raw);
++    encoder.encode(raw, scale, plaintext);
++    timer.stop();
++    cout << "Extend plaintext tool: " << timer.elapsed() * 1e3 << "ms" << endl;
++}
++
++inline void sample_ckks_poly(seal::SEALContext& context, seal::parms_id_type parms_id, uint64_t* destination){
++    auto context_data = context.get_context_data(parms_id);
++    auto &parms = context_data->parms();
++    auto &coeff_modulus = parms.coeff_modulus();
++    std::size_t coeff_modulus_size = coeff_modulus.size();
++    std::size_t coeff_count = parms.poly_modulus_degree();
++    auto bootstrap_prng = parms.random_generator()->create();
++    auto ntt_tables = context_data->small_ntt_tables();
++
++    auto* temp = static_cast<uint64_t*>(calloc(coeff_count, sizeof(uint64_t)));
++    sample_common_plaintext_polynomial(coeff_modulus.at(0), coeff_count, bootstrap_prng, temp);
++
++    decompose_poly(temp, coeff_count, coeff_modulus_size, ntt_tables, coeff_modulus, destination);
++
++    free(temp);
++}
++
++inline void sample_polynomial(uint64_t* destination, const seal::EncryptionParameters& parms){
++    auto bootstrap_prng = parms.random_generator()->create();
++    seal::prng_seed_type public_prng_seed;
++    bootstrap_prng->generate(seal::prng_seed_byte_count, reinterpret_cast<seal::seal_byte *>(public_prng_seed.data()));
++    auto ciphertext_prng = seal::UniformRandomGeneratorFactory::DefaultFactory()->create(public_prng_seed);
++    sample_poly_uniform(ciphertext_prng, parms, destination);
++}
++
++template<class T>
++T get_random_from_inputs(int nplayers, Preprocessing<T>& prep)
++{
++    T res;
++    for (int j = 0; j < nplayers; j++)
++    {
++        T tmp;
++        typename T::open_type _;
++        prep.get_input_no_count(tmp, _, j);
++        res += tmp;
++    }
++    return res;
++}
++
++template<class T>
++inline void sample_common_polynomial_shared(vector<T>& destination, SharedSecretKey<T>& shared_key){
++    for(size_t i = 0; i < destination.size(); i++){
++        destination[i] = get_random_from_inputs(shared_key.P().num_players(), shared_key.protocol_set().preprocessing);
++    } 
++}
++
++template<class T>
++inline void
++sample_common_polynomial(uint64_t *destination, const seal::EncryptionParameters &parms, size_t len,
++                         SharedSecretKey<T> &shared_key) {
++    vector<T> poly(len);
++    sample_common_polynomial_shared(poly, shared_key);
++    open_polynomial(shared_key, poly, parms.coeff_modulus(), parms.coeff_modulus().size(), destination);
++}
++
++template <class T>
++inline void sample_polynomial_from_seed(uint64_t *destination, const seal::EncryptionParameters &parms, size_t len, SharedSecretKey<T> &shared_key, seal::prng_seed_type& seed){
++
++    seal::Blake2xbPRNG generator(seed);
++    generator.generate(len * sizeof(uint64_t), (seal::seal_byte *)destination);
++    mod_poly<T>(destination, shared_key.coeff_count_, len/shared_key.coeff_count_, parms.coeff_modulus());
++}
++
++template<class T>
++inline void sample_common_seed(SharedSecretKey<T> &shared_key, seal::prng_seed_type& seed){
++    vector<T> poly(seal::prng_seed_uint64_count);
++    sample_common_polynomial_shared(poly, shared_key);
++    auto& output = shared_key.output();
++    auto& set = shared_key.protocol_set();
++    auto& P = shared_key.P();
++    vector<typename T::clear> res(poly.size());
++
++    output.init_open(P);
++    for (auto share : poly) {
++        output.prepare_open(share);
++    }
++    output.exchange(P);
++    for (size_t i = 0; i < res.size(); i++) {
++        auto& clear = res[i];
++        clear = output.finalize_open();
++        bigint a;
++        bigint max(UINT64_MAX);
++        a.from_signed<10, T::clear::N_LIMBS>(clear);
++        ostringstream os;
++        a %= max;
++        os << a;
++        istringstream iss(os.str());
++        iss >> seed[i];
++    }
++    set.check();
++}
++
++template<class T>
++inline seal::prng_seed_type
++sample_common_polynomial_PRF(uint64_t *destination, const seal::EncryptionParameters &parms, size_t len, 
++                            SharedSecretKey<T> &shared_key, seal::prng_seed_type* seed_ptr = nullptr){
++    seal::prng_seed_type seed;
++    if(seed_ptr == nullptr){
++        sample_common_seed(shared_key, seed);
++    } else {
++        // guarantees fresh seed
++        increment_seed(*seed_ptr);
++        seed = *seed_ptr;
++    }
++    seal::Blake2xbPRNG generator(seed);
++
++    generator.generate(len * sizeof(uint64_t), (seal::seal_byte *)destination);
++    mod_poly<T>(destination, shared_key.coeff_count_, len/shared_key.coeff_count_, parms.coeff_modulus());
++    return seed;
++}
++
++template<class T>
++void get_distributed_noise(vector<T>& noise, size_t coeff_count, size_t coeff_modulus_size, const seal::SEALContext::ContextData& context_data,
++                           SharedSecretKey<T>& secret_key){
++    seal::MemoryPoolHandle pool = seal::MemoryManager::GetPool(seal::mm_prof_opt::mm_force_new, true);
++    auto &parms = context_data.parms();
++    auto ntt_tables = context_data.small_ntt_tables();
++    auto bootstrap_prng = parms.random_generator()->create();
++
++    auto noise_(seal::util::allocate_poly(coeff_count, coeff_modulus_size, pool));
++    seal::util::SEAL_NOISE_SAMPLER(bootstrap_prng, parms, noise_.get());
++    //sample_poly_normal_smudged(bootstrap_prng, parms, noise_.get(), 1);
++    for (size_t i = 0; i < coeff_modulus_size; ++i) {
++        ntt_negacyclic_harvey(noise_.get() + i * coeff_count, ntt_tables[i]);
++    }
++    distribute_noise(noise_.get(), noise.size(), secret_key, noise);
++}
++
++template<class T>
++void set_small_vec(const vector<T>& big, vector<T>& small, size_t offset=0){
++    for (size_t i = 0; i < small.size(); ++i) {
++        small.at(i) = big.at(i + offset);
++    }
++}
++
++template<class T>
++void create_shared_pk(SharedSecretKey<T> &secret_key, uint64_t *result_c1, vector<T> &result_c0,
++                      const seal::SEALContext &context, seal::parms_id_type parms_id, bool c1_empty) {
++    auto &context_data = *context.get_context_data(parms_id);
++    auto &parms = context_data.parms();
++    auto &coeff_modulus = parms.coeff_modulus();
++    size_t coeff_modulus_size = coeff_modulus.size();
++    size_t coeff_count = parms.poly_modulus_degree();
++    vector<T> noise(result_c0.size());
++    size_t len = coeff_count * coeff_modulus_size;
++    auto* c1_negative = (uint64_t*)malloc(len * sizeof(uint64_t));
++
++    // result_c1 = p
++    // c1_negative = -p
++    if(c1_empty){
++        sample_common_polynomial_PRF(result_c1, parms, len, secret_key);
++    }
++
++
++    get_distributed_noise(noise, coeff_count, coeff_modulus_size, context_data, secret_key);
++
++    for (size_t i = 0; i < coeff_modulus_size; ++i) {
++        seal::util::negate_poly_coeffmod(result_c1 + i * coeff_count, coeff_count, coeff_modulus[i], c1_negative + i * coeff_count);
++    }
++
++    // c0 = -c1 * s + e
++    dyadic_product_coeffmod_(secret_key.data(), c1_negative, secret_key.data().size(), result_c0);
++    //add_poly_coeffmod_(result_c0, noise, result_c0);
++
++    free(c1_negative);
++}
++
++template<class T>
++void encrypt_shared_zero_symmetric(SharedSecretKey<T> &secret_key, const seal::SEALContext &context,
++                                   seal::parms_id_type parms_id, seal::Ciphertext &destination) {
++
++    auto &context_data = *context.get_context_data(parms_id);
++    auto &parms = context_data.parms();
++    auto &coeff_modulus = parms.coeff_modulus();
++
++    destination.resize(context, parms_id, 2);
++    destination.is_ntt_form() = true;
++    destination.scale() = 1.0;
++
++    // Generate ciphertext: (c[0], c[1]) = ([-(as+e)]_q, a)
++    uint64_t *c0 = destination.data();
++    uint64_t *c1 = destination.data(1);
++    vector<T> temp_big(secret_key.data().size());
++
++    create_shared_pk(secret_key, c1, temp_big, context, parms_id, true);
++
++    open_polynomial(secret_key, temp_big, coeff_modulus, destination.coeff_modulus_size(), c0);
++
++}
++
++#endif // CODE_RLWE_H
+\ No newline at end of file
+diff --git a/MPHE/util.h b/MPHE/util.h
+new file mode 100644
+index 00000000..85072f02
+--- /dev/null
++++ b/MPHE/util.h
+@@ -0,0 +1,366 @@
++
++#ifndef CODE_UTIL_H
++#define CODE_UTIL_H
++
++#include "params.h"
++
++// Forks the process and lets child execute the function provided in the parameter
++inline void clone(void (*function)()){
++    pid_t pid = fork();
++    if(pid == -1){
++        std::cout << "fork failed" << std::endl;
++        exit(-1);
++    } else if(pid != 0){
++        return;
++    }
++    (*function)();
++    exit(0);
++}
++
++// Sends Data to all players
++inline void send_word(Player& P, octet* to_send, size_t len){
++    octetStream os(len, to_send);
++    P.send_all(os);
++}
++
++// Receives Data from player 0
++inline void recv_word(Player& P, octet* dest, size_t len){
++    octetStream os;
++    P.receive_player(0, os);
++    octet* src = os.consume(len);
++    memcpy(dest, src, len);
++}
++
++
++inline void send_ciphertext(Player &P, int sending_party, seal::Ciphertext& ct) {
++    if(P.my_num() != sending_party){
++        std::cout << "Error sending ciphertext" << std::endl;
++        exit(-1);
++    }
++    size_t length = MPHE_PARAMS::MOD_DEGREE * ct.coeff_modulus_size() * sizeof(uint64_t);
++    octetStream os(sizeof(size_t), (octet*)(&length));
++    P.send_all(os);
++    uint64_t* ct_c0 = ct.data();
++    uint64_t* ct_c1 = ct.data(1);
++    octetStream os_ct(length, (octet*)ct_c0);
++    os_ct.append((octet*)ct_c1, length);
++    P.send_all(os_ct);
++
++}
++
++inline void recv_ciphertext(Player &P, int sending_party, seal::Ciphertext& ct) {
++    octetStream os;
++    size_t length;
++    P.receive_player(sending_party, os);
++    os.consume((octet*)&length, sizeof(size_t));
++    octetStream os_new;
++    P.receive_player(sending_party, os_new);
++    auto ct_c0 = (uint64_t*)os_new.consume(length);
++    auto ct_c1 = (uint64_t*)os_new.consume(length);
++    memcpy(ct.data(), ct_c0, length);
++    memcpy(ct.data(1), ct_c1, length);
++
++}
++
++inline void exchange_ciphertext(Player& P, int sending_party, seal::Ciphertext& ct){
++    int my_num = P.my_num();
++    seal::Ciphertext ct_new(ct);
++    (my_num == 0) ? send_ciphertext(P, sending_party, ct) : recv_ciphertext(P, sending_party, ct_new);
++    ct = ct_new;
++}
++
++inline void print_polynomial(uint64_t *polynomial, size_t len, const std::string& name) {
++
++    seal::util::HashFunction::hash_block_type c0_hash;
++
++    seal::util::HashFunction::hash(polynomial, len, c0_hash);
++
++    std::cout << name << " hash: ";
++    for (unsigned long i : c0_hash) {
++        std::cout << std::hex << i;
++    }
++    std::cout << std::dec << std::endl;
++
++}
++
++inline void print_pk(seal::PublicKey pk, size_t len, std::string&& name) {
++    std::cout << "public key " << name << std::endl;
++    print_polynomial(pk.data().data(), len, "c0-" + name);
++    print_polynomial(pk.data().data(1), len, "c1-" + name);
++}
++
++/*
++Helper function: Prints the parameters in a SEALContext.
++*/
++inline void print_parameters(const seal::SEALContext &context)
++{
++    auto &context_data = *context.key_context_data();
++
++    /*
++    Which scheme are we using?
++    */
++    std::string scheme_name;
++    switch (context_data.parms().scheme())
++    {
++        case seal::scheme_type::bfv:
++            scheme_name = "BFV";
++            break;
++            case seal::scheme_type::ckks:
++                scheme_name = "CKKS";
++                break;
++                default:
++                    throw std::invalid_argument("unsupported scheme");
++    }
++    std::cout << "/" << std::endl;
++    std::cout << "| Encryption parameters :" << std::endl;
++    std::cout << "|   scheme: " << scheme_name << std::endl;
++    std::cout << "|   poly_modulus_degree: " << context_data.parms().poly_modulus_degree() << std::endl;
++
++    /*
++    Print the size of the true (product) coefficient modulus.
++    */
++    std::cout << "|   coeff_modulus size: ";
++    std::cout << context_data.total_coeff_modulus_bit_count() << " (";
++    auto coeff_modulus = context_data.parms().coeff_modulus();
++    std::size_t coeff_modulus_size = coeff_modulus.size();
++    for (std::size_t i = 0; i < coeff_modulus_size - 1; i++)
++    {
++        std::cout << coeff_modulus[i].bit_count() << " + ";
++    }
++    std::cout << coeff_modulus.back().bit_count();
++    std::cout << ") bits" << std::endl;
++
++    /*
++    For the BFV scheme print the plain_modulus parameter.
++    */
++    if (context_data.parms().scheme() == seal::scheme_type::bfv)
++    {
++        std::cout << "|   plain_modulus: " << context_data.parms().plain_modulus().value() << std::endl;
++    }
++
++    std::cout << "\\" << std::endl;
++}
++template <typename T>
++inline void print_matrix(std::vector<T> matrix, std::size_t row_size)
++{
++    /*
++    We're not going to print every column of the matrix (there are 2048). Instead
++    print this many slots from beginning and end of the matrix.
++    */
++    std::size_t print_size = 5;
++
++    std::cout << std::endl;
++    std::cout << "    [";
++    for (std::size_t i = 0; i < print_size; i++)
++    {
++        std::cout << std::setw(3) << std::right << matrix[i] << ",";
++    }
++    std::cout << std::setw(3) << " ...,";
++    for (std::size_t i = row_size - print_size; i < row_size; i++)
++    {
++        std::cout << std::setw(3) << matrix[i] << ((i != row_size - 1) ? "," : " ]\n");
++    }
++    std::cout << "    [";
++    for (std::size_t i = row_size; i < row_size + print_size; i++)
++    {
++        std::cout << std::setw(3) << matrix[i] << ",";
++    }
++    std::cout << std::setw(3) << " ...,";
++    for (std::size_t i = 2 * row_size - print_size; i < 2 * row_size; i++)
++    {
++        std::cout << std::setw(3) << matrix[i] << ((i != 2 * row_size - 1) ? "," : " ]\n");
++    }
++    std::cout << std::endl;
++}
++inline void decode_matrix(seal::Decryptor& decryptor, seal::BatchEncoder& batch_encoder, seal::Ciphertext& ciphertext, bool out=true){
++    size_t slot_count = batch_encoder.slot_count();
++    size_t row_size = slot_count / 2;
++    seal::Plaintext plaintext;
++    vector<uint64_t> pod_matrix(slot_count, 0ULL);
++    decryptor.decrypt(ciphertext, plaintext);
++    batch_encoder.decode(plaintext, pod_matrix);
++    if(out)
++        print_matrix(pod_matrix, row_size);
++}
++
++inline void create_matrix(seal::Encryptor& encryptor, seal::BatchEncoder& batch_encoder, seal::Ciphertext& encrypted_matrix, bool out=true){
++    size_t slot_count = batch_encoder.slot_count();
++    size_t row_size = slot_count / 2;
++    vector<uint64_t> pod_matrix(slot_count, 0ULL);
++    pod_matrix[0] = 0ULL;
++    pod_matrix[1] = 1ULL;
++    pod_matrix[2] = 2ULL;
++    pod_matrix[3] = 3ULL;
++    pod_matrix[row_size] = 4ULL;
++    pod_matrix[row_size + 1] = 5ULL;
++    pod_matrix[row_size + 2] = 6ULL;
++    pod_matrix[row_size + 3] = 7ULL;
++    if(out)
++        print_matrix(pod_matrix, row_size);
++    seal::Plaintext plain_matrix;
++    batch_encoder.encode(pod_matrix, plain_matrix);
++    encryptor.encrypt(plain_matrix, encrypted_matrix);
++}
++
++/*
++Helper function: Prints a vector of floating-point values.
++*/
++template <typename T>
++inline void print_vector(std::vector<T> vec, std::size_t print_size = 4, int prec = 3)
++{
++    /*
++    Save the formatting information for std::cout.
++    */
++    std::ios old_fmt(nullptr);
++    old_fmt.copyfmt(std::cout);
++
++    std::size_t slot_count = vec.size();
++
++    std::cout << std::fixed << std::setprecision(prec);
++    std::cout << std::endl;
++    if (slot_count <= 2 * print_size)
++    {
++        std::cout << "    [";
++        for (std::size_t i = 0; i < slot_count; i++)
++        {
++            std::cout << " " << vec[i] << ((i != slot_count - 1) ? "," : " ]\n");
++        }
++    }
++    else
++    {
++        vec.resize(std::max(vec.size(), 2 * print_size));
++        std::cout << "    [";
++        for (std::size_t i = 0; i < print_size; i++)
++        {
++            std::cout << " " << vec[i] << ",";
++        }
++        if (vec.size() > 2 * print_size)
++        {
++            std::cout << " ...,";
++        }
++        for (std::size_t i = slot_count - print_size; i < slot_count; i++)
++        {
++            std::cout << " " << vec[i] << ((i != slot_count - 1) ? "," : " ]\n");
++        }
++    }
++    std::cout << std::endl;
++
++    /*
++    Restore the old std::cout formatting.
++    */
++    std::cout.copyfmt(old_fmt);
++}
++
++inline void increment_seed(seal::prng_seed_type& seed){
++    uint64_t carry = 0;
++    for(auto& seed_part : seed){
++        if((UINT64_MAX - (carry + 1)) <= seed_part){
++            carry = 1;
++        } else {
++            seed_part++;
++            return;
++        }
++        seed_part += (carry + 1);
++    }
++}
++
++inline void print_seed(seal::prng_seed_type& seed){
++    for(auto& seed_part : seed){
++        std::cout << seed_part << ",";
++    }
++    std::cout << std::endl;
++}
++
++inline seal::SEALContext distribute_context(Player& P, seal::scheme_type scheme, uint64_t mod_degree,
++                                            uint64_t plain_mod, vector<seal::Modulus> moduli, bool sec80){
++    if(scheme != seal::scheme_type::bfv && scheme != seal::scheme_type::ckks){
++        throw logic_error("Undefined scheme type");
++    }
++    seal::EncryptionParameters parms(scheme);
++    auto type = (octet)scheme;
++    send_word(P, &type, 1);
++
++    // exchange poly_mod_degree
++    size_t poly_mod_degree = mod_degree;
++    parms.set_poly_modulus_degree(poly_mod_degree);
++    send_word(P, (octet*)&poly_mod_degree, sizeof(size_t));
++
++    // Set and transmit moduli
++    parms.set_coeff_modulus(moduli);
++    size_t modulus_len = moduli.size();
++    if(modulus_len > UINT8_MAX){
++        throw logic_error("too many moduli");
++    }
++    send_word(P, (octet*)&modulus_len, sizeof(octet));
++    for (size_t i = 0; i < modulus_len; ++i) {
++        send_word(P, (octet *) moduli[i].data(), sizeof(uint64_t));
++    }
++
++    // exchange plain modulus
++    if(scheme == seal::scheme_type::bfv) {
++        seal::Modulus plain_modulus(plain_mod);
++        parms.set_plain_modulus(plain_modulus);
++        send_word(P, (octet *) plain_modulus.data(), sizeof(uint64_t));
++    }
++
++    if(sec80){
++        return {parms, true, seal::sec_level_type::none};
++    }
++    return {parms};
++
++}
++
++inline seal::SEALContext distribute_context(Player &P, seal::scheme_type scheme) {
++
++    seal::Modulus plain_mod = seal::PlainModulus::Batching(MPHE_PARAMS::MOD_DEGREE, MPHE_PARAMS::PLAIN_BIT_LENGTH);
++
++    const vector<int>& sizes = MPHE_PARAMS::scheme_param_map.at(scheme);
++
++    vector<seal::Modulus> moduli = seal::CoeffModulus::Create(MPHE_PARAMS::MOD_DEGREE,sizes);
++
++    return distribute_context(P, scheme, MPHE_PARAMS::MOD_DEGREE, *plain_mod.data(), moduli, false);
++}
++inline seal::SEALContext receive_context(Player& P){
++    octet type;
++    recv_word(P, &type, 1);
++    if(type != 1 && type != 2){
++        throw invalid_argument("invalid type " + to_string(type));
++    }
++    auto scheme = (seal::scheme_type)type;
++    if(scheme != seal::scheme_type::bfv && scheme != seal::scheme_type::ckks){
++        throw logic_error("Undefined scheme type");
++    }
++    seal::EncryptionParameters parms(scheme);
++
++    // exchange poly_mod_degree
++    size_t poly_mod_degree;
++    recv_word(P, (octet*)&poly_mod_degree, sizeof(size_t));
++    parms.set_poly_modulus_degree(poly_mod_degree);
++
++
++    octet len = 0;
++    recv_word(P, &len, sizeof(octet));
++    vector<seal::Modulus> moduli(len);
++    for (int i = 0; i < len; ++i) {
++        uint64_t mod_value = 0;
++        recv_word(P, (octet*)&mod_value, sizeof(uint64_t));
++        moduli[i] = seal::Modulus(mod_value);
++    }
++
++    parms.set_coeff_modulus(moduli);
++
++    // exchange plain modulus
++    if(type == 1){
++        uint64_t plain_word = 0;
++        recv_word(P, (octet*)&plain_word, sizeof(uint64_t));
++        parms.set_plain_modulus(seal::Modulus(plain_word));
++    }
++    seal::SEALContext context(parms);
++
++    return context;
++}
++
++inline seal::SEALContext get_context(Player &P, seal::scheme_type scheme) {
++    return (P.my_num() == 0) ? distribute_context(P, scheme) : receive_context(P);
++}
++#endif //CODE_UTIL_H
+diff --git a/Makefile b/Makefile
+index 448bd3b5..2cd6e05e 100644
+--- a/Makefile
++++ b/Makefile
+@@ -29,6 +29,7 @@ SPDZ = Machines/SPDZ.o $(TINIER)
+ 
+ 
+ LIB = libSPDZ.a
++LIBMPHE = mphe.a
+ SHAREDLIB = libSPDZ.so
+ FHEOFFLINE = libFHE.so
+ LIBRELEASE = librelease.a
+@@ -146,6 +147,9 @@ $(SHAREDLIB): $(PROCESSOR) $(COMMONOBJS) GC/square64.o GC/Instruction.o
+ $(FHEOFFLINE): $(FHEOBJS) $(SHAREDLIB)
+ 	$(CXX) $(CFLAGS) -shared -o $@ $^ $(LDLIBS)
+ 
++$(LIBMPHE): $(patsubst %.cpp, %.o, $(wildcard MPHE/*API.cpp)) Protocols/MalRepRingOptions.o $(PROCESSOR) $(COMMONOBJS) $(TINIER) $(GC)
++	$(AR) -csr $@ $^
++
+ static/%.x: Machines/%.o $(LIBRELEASE) $(LIBSIMPLEOT) local/lib/libcryptoTools.a local/lib/liblibOTe.a
+ 	$(MAKE) static-dir
+ 	$(CXX) -o $@ $(CFLAGS) $^ -Wl,-Map=$<.map -Wl,-Bstatic -static-libgcc -static-libstdc++ $(LIBRELEASE) -llibOTe -lcryptoTools $(LIBSIMPLEOT) $(BOOST) $(LDLIBS) -Wl,-Bdynamic -ldl
+@@ -227,6 +231,11 @@ Fake-Offline.x: Utils/Fake-Offline.o $(VM)
+ %-ecdsa-party.x: ECDSA/%-ecdsa-party.o ECDSA/P256Element.o $(VM)
+ 	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS)
+ 
++%-mphe-party.x: MPHE/%-mphe-party.o $(VM)
++	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SEAL)
++
++
++benchmark-mphe-party.x: $(OT) mphe.a
+ replicated-bin-party.x: GC/square64.o
+ replicated-ring-party.x: GC/square64.o
+ replicated-field-party.x: GC/square64.o
+@@ -291,6 +300,10 @@ static/bmr-program-party.x: $(BMR)
+ static/no-party.x: Protocols/ShareInterface.o
+ Test/failure.x: Protocols/MalRepRingOptions.o
+ 
++
++benchmark: benchmark-mphe-party.x
++	mv benchmark-mphe-party.x ../bin/bench
++
+ ifeq ($(AVX_OT), 1)
+ $(LIBSIMPLEOT_ASM): deps/SimpleOT/Makefile
+ 	$(MAKE) -C deps/SimpleOT
+diff --git a/Networking/Player.cpp b/Networking/Player.cpp
+index 13767f40..8630a280 100644
+--- a/Networking/Player.cpp
++++ b/Networking/Player.cpp
+@@ -227,9 +227,13 @@ Names::~Names()
+ Player::Player(const Names& Nms) :
+         PlayerBase(Nms.my_num()), N(Nms)
+ {
++  std::cout << "Player constructor" << std::endl;
+   nplayers=Nms.nplayers;
++  std::cout << "player no: " << std::endl;
+   player_no=Nms.player_no;
++  std::cout << "thread_stats resize .";
+   thread_stats.resize(nplayers);
++  std::cout << ".. done" << std::endl;
+ }
+ 
+ 
+@@ -237,6 +241,7 @@ template<class T>
+ MultiPlayer<T>::MultiPlayer(const Names& Nms, const string& id) :
+         Player(Nms), id(id), send_to_self_socket(0)
+ {
++  std::cout << "sockets resize" << std::endl;
+   sockets.resize(Nms.num_players());
+ }
+ 
+@@ -244,6 +249,7 @@ MultiPlayer<T>::MultiPlayer(const Names& Nms, const string& id) :
+ PlainPlayer::PlainPlayer(const Names& Nms, const string& id) :
+         MultiPlayer<int>(Nms, id)
+ {
++  std::cout << "setup sockets" << std::endl;
+   if (Nms.num_players() > 1)
+     setup_sockets(Nms.names, Nms.ports, id, *Nms.server);
+ }
+diff --git a/Protocols/MAC_Check.hpp b/Protocols/MAC_Check.hpp
+index ee6b0385..23d56cf5 100644
+--- a/Protocols/MAC_Check.hpp
++++ b/Protocols/MAC_Check.hpp
+@@ -34,12 +34,15 @@ template<class U>
+ void Tree_MAC_Check<U>::setup(Player& P)
+ {
+   assert(coordinator == 0);
++  std::cout << "new coordinator " << U::type_string() + to_string(U::clear::length()) << std::endl;
+   coordinator = new Coordinator(P.N, U::type_string() + to_string(U::clear::length()));
++  std::cout << "setting coordinator" << std::endl;
+   U::prep_type::MAC_Check::coordinator = coordinator;
+   U::prep_check_type::MAC_Check::coordinator = coordinator;
+   U::bit_prep_type::MAC_Check::coordinator = coordinator;
+   U::bit_prep_type::prep_check_type::MAC_Check::coordinator = coordinator;
+   U::input_check_type::MAC_Check::coordinator = coordinator;
++  std::cout << "coordinator set" << std::endl;
+ }
+ 
+ template<class U>
+diff --git a/Protocols/MaliciousRepPrep.h b/Protocols/MaliciousRepPrep.h
+index be005182..2fa1cbfb 100644
+--- a/Protocols/MaliciousRepPrep.h
++++ b/Protocols/MaliciousRepPrep.h
+@@ -51,11 +51,11 @@ class MaliciousRepPrep : public MaliciousBitOnlyRepPrep<T>
+     template<class U> friend class MalRepRingPrep;
+ 
+ protected:
+-    void buffer_triples();
+     void buffer_squares();
+     void buffer_inputs(int player);
+ 
+ public:
++    void buffer_triples();
+     MaliciousRepPrep(SubProcessor<T>* proc, DataPositions& usage);
+     MaliciousRepPrep(DataPositions& usage, int = 0);
+     template<class V>
+diff --git a/Protocols/ProtocolSetup.h b/Protocols/ProtocolSetup.h
+index 63c47172..764de898 100644
+--- a/Protocols/ProtocolSetup.h
++++ b/Protocols/ProtocolSetup.h
+@@ -27,13 +27,15 @@ public:
+         // initialize fields
+         if (prime_length == 0)
+             prime_length = T::clear::MAX_N_BITS;
+-
++        std::cout << "prime_length: " << prime_length << std::endl;
+         T::clear::init_default(prime_length);
++        std::cout << "init default" << std::endl;
+         T::clear::next::init_default(prime_length, false);
+ 
+         // must initialize MAC key for security of some protocols
++        std::cout << "read or generate mac" << std::endl;
+         T::read_or_generate_mac_key(directory, P, mac_key);
+-
++        std::cout << "mac check setup " << std::endl;
+         T::MAC_Check::setup(P);
+     }
+ 
+diff --git a/Protocols/ReplicatedPrep.h b/Protocols/ReplicatedPrep.h
+index 5279c9cf..d8a9d0be 100644
+--- a/Protocols/ReplicatedPrep.h
++++ b/Protocols/ReplicatedPrep.h
+@@ -375,7 +375,7 @@ template<class T>
+ class ReplicatedRingPrep : public virtual BitPrep<T>
+ {
+ protected:
+-    void buffer_triples();
++
+     void buffer_squares();
+ 
+ public:
+@@ -385,7 +385,7 @@ public:
+     }
+ 
+     virtual ~ReplicatedRingPrep() {}
+-
++    void buffer_triples();
+     virtual void buffer_bits() { this->buffer_bits_without_check(); }
+ };
+ 
+diff --git a/Tools/Coordinator.cpp b/Tools/Coordinator.cpp
+index c17bf6bd..b7f34baf 100644
+--- a/Tools/Coordinator.cpp
++++ b/Tools/Coordinator.cpp
+@@ -16,6 +16,7 @@ void* Coordinator::run_thread(void* coordinator)
+ Coordinator::Coordinator(const Names& N, string type_name) :
+         P(N, "coordinate-" + type_name), waited(0)
+ {
++    std::cout << "spawning thread" << std::endl;
+     pthread_create(&thread, 0, run_thread, this);
+ }
+ 

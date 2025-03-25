@@ -1,0 +1,6 @@
+[submodule "MP-SPDZ"]
+	path = MP-SPDZ
+	url = git@github.com:data61/MP-SPDZ.git
+[submodule "SEAL"]
+	path = SEAL
+	url = git@github.com:microsoft/SEAL.git
