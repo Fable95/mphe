@@ -1425,10 +1425,10 @@ index 00000000..736a8c15
 +}
 diff --git a/MPHE/benchmark.h b/MPHE/benchmark.h
 new file mode 100644
-index 00000000..7bb806be
+index 00000000..f9c56bf5
 --- /dev/null
 +++ b/MPHE/benchmark.h
-@@ -0,0 +1,695 @@
+@@ -0,0 +1,703 @@
 +//
 +// Created by fable on 27.03.22.
 +//
@@ -1701,8 +1701,8 @@ index 00000000..7bb806be
 +            stop<T>();
 +            seal::Decryptor decryptor(api.context(), sk);
 +            decryptor.decrypt(ct_new, pt);
-+            // cout << "bootstrap expected: 10" << endl;
-+            // cout << "bootstrap received: " << pt.to_string() << endl;
++            cout << "bootstrap expected: 10" << endl;
++            cout << "bootstrap received: " << pt.to_string() << endl;
 +        }
 +        template<class T>
 +        void bench_switch_sk(mpheAPI<T>& api){
@@ -1722,8 +1722,8 @@ index 00000000..7bb806be
 +
 +            seal::Decryptor decryptor(api.context(), sk);
 +            decryptor.decrypt(ct_new, pt);
-+            // cout << "switch sk expected: 10" << endl;
-+            // cout << "switch sk received: " << pt.to_string() << endl;
++            cout << "switch sk expected: 10" << endl;
++            cout << "switch sk received: " << pt.to_string() << endl;
 +        }
 +        template<class T>
 +        void bench_switch_pk(mpheAPI<T>& api){
@@ -1743,8 +1743,8 @@ index 00000000..7bb806be
 +
 +            seal::Decryptor decryptor(api.context(), sk);
 +            decryptor.decrypt(ct_new, pt);
-+            // cout << "switch pk expected: 10" << endl;
-+            // cout << "switch pk received: " << pt.to_string() << endl;
++            cout << "switch pk expected: 10" << endl;
++            cout << "switch pk received: " << pt.to_string() << endl;
 +        }
 +        template<class T>
 +        void bench_decrypt(mpheAPI<T>& api){
@@ -1761,8 +1761,8 @@ index 00000000..7bb806be
 +            api.decrypt(ct, pt, key);
 +            stop<T>();
 +
-+            // cout << "decrypt expected: 10" << endl;
-+            // cout << "decrypt received: " << pt.to_string() << endl;
++            cout << "decrypt expected: 10" << endl;
++            cout << "decrypt received: " << pt.to_string() << endl;
 +        }
 +        template<class T>
 +        void bench_relin(mpheAPI<T>& api){
@@ -1787,8 +1787,8 @@ index 00000000..7bb806be
 +
 +            seal::Decryptor decryptor(api.context(), sk);
 +            decryptor.decrypt(ct, pt);
-+            // cout << "re-linearized expected: 100" << endl;
-+            // cout << "re-linearized received: " << pt.to_string() << endl;
++            cout << "re-linearized expected: 100" << endl;
++            cout << "re-linearized received: " << pt.to_string() << endl;
 +        }
 +
 +        template<class T>
@@ -1812,8 +1812,8 @@ index 00000000..7bb806be
 +
 +            seal::Decryptor decryptor(api.context(), sk);
 +            decryptor.decrypt(ct, pt);
-+            // cout << "re-linearized expected: 100" << endl;
-+            // cout << "re-linearized received: " << pt.to_string() << endl;
++            cout << "re-linearized expected: 100" << endl;
++            cout << "re-linearized received: " << pt.to_string() << endl;
 +        }
 +
 +        template<class T>
@@ -1880,26 +1880,28 @@ index 00000000..7bb806be
 +class NetworkParams {
 +    public:
 +        Player* P_;
++        Names* N_;
 +        ez::ezOptionParser opt_;
 +        seal::SEALContext* context_;
 +
 +        NetworkParams(int argc, const char ** argv){
-+            Names N(opt_, argc, argv, 3);
-+            P_ = new CryptoPlayer(N);
++            N_ = new Names(opt_, argc, argv, 3);
++            P_ = new CryptoPlayer(*N_);
 +            //seal::scheme_type scheme = (opt_.get("-C")->isSet) ? seal::scheme_type::ckks : seal::scheme_type::bfv;
 +            seal::scheme_type scheme = seal::scheme_type::bfv;
 +            seal::SEALContext context = get_context(*P_, scheme);
 +            context_ = new seal::SEALContext(context);
-+        
++            // print_parameters(*context_);
 +        }
 +
 +        template<class T>
 +        T create_api(){
-+            return T::create_api(*context_, P_, false);
++            return T::create_api(*context_, P_, false, 0);
 +        }
 +
 +        ~NetworkParams(){
 +            delete P_;
++            delete N_;
 +            delete context_;
 +        }
 +
@@ -1913,15 +1915,7 @@ index 00000000..7bb806be
 +
 +
 +    template<class T>
-+    void bench_api(benchmark& bench, NetworkParams& params){
-+        std::cout << "bench api" << std::endl;
-+        // params.set_context(get_context(*params.P_, seal::scheme_type::bfv));
-+        bench.start<typename T::ShareType>(SETUP);
-+        T api = params.create_api<T>();
-+        std::cout << "api created" << std::endl;
-+        print_parameters(api.context());
-+        bench.stop<typename T::ShareType>();
-+        bench.set_my_num(api.P().my_num());
++    void bench_api(benchmark& bench, T& api){
 +        bench.bench_sk_gen(api);
 +        bench.bench_pk_gen(api);
 +        bench.bench_bootstrap(api);
@@ -1930,13 +1924,11 @@ index 00000000..7bb806be
 +        bench.bench_decrypt(api);
 +        bench.bench_relin(api);
 +        bench.bench_galois(api);
-+        
 +    }
 +
 +    template<class T>
-+    void relin_key_comparison(benchmark& bench, NetworkParams& params){
++    void relin_key_comparison(benchmark& bench, T& api){
 +        //params.set_context(get_context(*params.P_, seal::scheme_type::bfv));
-+        T api = params.create_api<T>();
 +        bench.set_my_num(api.P().my_num());
 +        
 +        bench.bench_relin(api);
@@ -2064,15 +2056,31 @@ index 00000000..7bb806be
 +
 +    template<class T>
 +    void bench_all_bfv(benchmark& bench, NetworkParams& params){
-+        bench_api<T>(bench, params);
-+        relin_key_comparison<T>(bench, params);
++        std::cout << "bench api" << std::endl;
++        bench.start<typename T::ShareType>(SETUP);
++        T api = params.create_api<T>();
++        std::cout << "api created" << std::endl;
++        print_parameters(api.context());
++        bench.stop<typename T::ShareType>();
++        bench.set_my_num(api.P().my_num());
++
++        bench_api<T>(bench, api);
++        relin_key_comparison<T>(bench, api);
 +    }
 +
 +    template<class T>
 +    void bench_all_ckks(benchmark& bench, NetworkParams& params){
 +        // CKKS is not set here!
-+        bench_api<T>(bench, params);
-+        relin_key_comparison<T>(bench, params);
++        std::cout << "bench api" << std::endl;
++        bench.start<typename T::ShareType>(SETUP);
++        T api = params.create_api<T>();
++        std::cout << "api created" << std::endl;
++        print_parameters(api.context());
++        bench.stop<typename T::ShareType>();
++        bench.set_my_num(api.P().my_num());
++
++        bench_api<T>(bench, api);
++        relin_key_comparison<T>(bench, api);
 +    }
 +
 +    void execute_all_protocols_bfv(int argc, const char** argv){
@@ -2083,19 +2091,19 @@ index 00000000..7bb806be
 +        
 +        for (size_t i = 0; i < NUM_RUNS_BENCHMARK; ++i) {
 +
-+	        // benchmark.set_current_share(SEMI);
-+            // bench_all_bfv<semiAPI>(benchmark, params);
++	        benchmark.set_current_share(SEMI);
++            bench_all_bfv<semiAPI>(benchmark, params);
 +            
 +            benchmark.set_current_share(MASCOT);
 +            bench_all_bfv<mascotAPI>(benchmark, params);
 +            
-+            // if(params.P_->num_players() > 2){
-+            //     benchmark.set_current_share(SHAMIR);
-+            //     bench_all_bfv<shamirAPI>(benchmark, params);
++            if(params.P_->num_players() > 2){
++                benchmark.set_current_share(SHAMIR);
++                bench_all_bfv<shamirAPI>(benchmark, params);
 +
-+            //     benchmark.set_current_share(MAL_SHAMIR);
-+            //     bench_all_bfv<malShamirAPI>(benchmark, params);
-+            // }
++                benchmark.set_current_share(MAL_SHAMIR);
++                bench_all_bfv<malShamirAPI>(benchmark, params);
++            }
 +        }
 +    }
 +
@@ -3695,60 +3703,6 @@ index 448bd3b5..2cd6e05e 100644
  ifeq ($(AVX_OT), 1)
  $(LIBSIMPLEOT_ASM): deps/SimpleOT/Makefile
  	$(MAKE) -C deps/SimpleOT
-diff --git a/Networking/Player.cpp b/Networking/Player.cpp
-index 13767f40..8630a280 100644
---- a/Networking/Player.cpp
-+++ b/Networking/Player.cpp
-@@ -227,9 +227,13 @@ Names::~Names()
- Player::Player(const Names& Nms) :
-         PlayerBase(Nms.my_num()), N(Nms)
- {
-+  std::cout << "Player constructor" << std::endl;
-   nplayers=Nms.nplayers;
-+  std::cout << "player no: " << std::endl;
-   player_no=Nms.player_no;
-+  std::cout << "thread_stats resize .";
-   thread_stats.resize(nplayers);
-+  std::cout << ".. done" << std::endl;
- }
- 
- 
-@@ -237,6 +241,7 @@ template<class T>
- MultiPlayer<T>::MultiPlayer(const Names& Nms, const string& id) :
-         Player(Nms), id(id), send_to_self_socket(0)
- {
-+  std::cout << "sockets resize" << std::endl;
-   sockets.resize(Nms.num_players());
- }
- 
-@@ -244,6 +249,7 @@ MultiPlayer<T>::MultiPlayer(const Names& Nms, const string& id) :
- PlainPlayer::PlainPlayer(const Names& Nms, const string& id) :
-         MultiPlayer<int>(Nms, id)
- {
-+  std::cout << "setup sockets" << std::endl;
-   if (Nms.num_players() > 1)
-     setup_sockets(Nms.names, Nms.ports, id, *Nms.server);
- }
-diff --git a/Protocols/MAC_Check.hpp b/Protocols/MAC_Check.hpp
-index ee6b0385..23d56cf5 100644
---- a/Protocols/MAC_Check.hpp
-+++ b/Protocols/MAC_Check.hpp
-@@ -34,12 +34,15 @@ template<class U>
- void Tree_MAC_Check<U>::setup(Player& P)
- {
-   assert(coordinator == 0);
-+  std::cout << "new coordinator " << U::type_string() + to_string(U::clear::length()) << std::endl;
-   coordinator = new Coordinator(P.N, U::type_string() + to_string(U::clear::length()));
-+  std::cout << "setting coordinator" << std::endl;
-   U::prep_type::MAC_Check::coordinator = coordinator;
-   U::prep_check_type::MAC_Check::coordinator = coordinator;
-   U::bit_prep_type::MAC_Check::coordinator = coordinator;
-   U::bit_prep_type::prep_check_type::MAC_Check::coordinator = coordinator;
-   U::input_check_type::MAC_Check::coordinator = coordinator;
-+  std::cout << "coordinator set" << std::endl;
- }
- 
- template<class U>
 diff --git a/Protocols/MaliciousRepPrep.h b/Protocols/MaliciousRepPrep.h
 index be005182..2fa1cbfb 100644
 --- a/Protocols/MaliciousRepPrep.h
@@ -3766,28 +3720,6 @@ index be005182..2fa1cbfb 100644
      MaliciousRepPrep(SubProcessor<T>* proc, DataPositions& usage);
      MaliciousRepPrep(DataPositions& usage, int = 0);
      template<class V>
-diff --git a/Protocols/ProtocolSetup.h b/Protocols/ProtocolSetup.h
-index 63c47172..764de898 100644
---- a/Protocols/ProtocolSetup.h
-+++ b/Protocols/ProtocolSetup.h
-@@ -27,13 +27,15 @@ public:
-         // initialize fields
-         if (prime_length == 0)
-             prime_length = T::clear::MAX_N_BITS;
--
-+        std::cout << "prime_length: " << prime_length << std::endl;
-         T::clear::init_default(prime_length);
-+        std::cout << "init default" << std::endl;
-         T::clear::next::init_default(prime_length, false);
- 
-         // must initialize MAC key for security of some protocols
-+        std::cout << "read or generate mac" << std::endl;
-         T::read_or_generate_mac_key(directory, P, mac_key);
--
-+        std::cout << "mac check setup " << std::endl;
-         T::MAC_Check::setup(P);
-     }
- 
 diff --git a/Protocols/ReplicatedPrep.h b/Protocols/ReplicatedPrep.h
 index 5279c9cf..d8a9d0be 100644
 --- a/Protocols/ReplicatedPrep.h
@@ -3809,16 +3741,4 @@ index 5279c9cf..d8a9d0be 100644
 +    void buffer_triples();
      virtual void buffer_bits() { this->buffer_bits_without_check(); }
  };
- 
-diff --git a/Tools/Coordinator.cpp b/Tools/Coordinator.cpp
-index c17bf6bd..b7f34baf 100644
---- a/Tools/Coordinator.cpp
-+++ b/Tools/Coordinator.cpp
-@@ -16,6 +16,7 @@ void* Coordinator::run_thread(void* coordinator)
- Coordinator::Coordinator(const Names& N, string type_name) :
-         P(N, "coordinate-" + type_name), waited(0)
- {
-+    std::cout << "spawning thread" << std::endl;
-     pthread_create(&thread, 0, run_thread, this);
- }
  
